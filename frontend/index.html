@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#090b0e"><title>GrowthLab AI | Your AI Assistant</title>
+<link rel="icon" type="image/png" href="./favicon.png">
+<link rel="stylesheet" href="./style.css"><script src="./app.js" defer></script>
+</head><body>
+<div class="app-shell">
+<aside class="sidebar" id="sidebar">
+  <div class="brand"><div class="brand-icon">G</div><div><h1>GrowthLab <span>AI</span></h1><p>Your intelligent assistant</p></div></div>
+  <button class="new-chat" id="newChatButton" type="button"><span aria-hidden="true">＋</span> New Chat</button>
+  <nav class="navigation" aria-label="Main navigation"><button class="nav-item active" data-page="chat" type="button"><span>◉</span> AI Chat</button></nav>
+  <div class="sidebar-label recent-label">YOUR WORKSPACE</div>
+  <div class="sidebar-hint">Ask questions, explore ideas, and create something great.</div>
+  <div class="sidebar-bottom"><div class="connection-card"><div class="connection-heading"><span class="status-dot" id="statusDot"></span><strong id="connectionText">Checking connection...</strong></div><p>Powered by Gemma 3</p></div><div class="sidebar-footer">GrowthLab Systems<span>AI-powered assistance</span></div></div>
+</aside>
+<main class="main-content">
+<header class="topbar"><button class="mobile-menu" id="menuButton" aria-label="Toggle navigation" type="button">☰</button><div><div class="eyebrow">YOUR INTELLIGENT WORKSPACE</div><h2 id="pageTitle">GrowthLab AI</h2></div><div class="topbar-badge"><span class="status-dot"></span> AI ASSISTANT</div></header>
+<section class="page active" id="chatPage"><div class="chat-container">
+<div class="chat-messages" id="chatMessages" aria-live="polite"></div>
+<div class="composer-area"><form class="chat-composer" id="chatForm"><label for="chatInput" class="sr-only">Message GrowthLab AI</label><textarea id="chatInput" placeholder="Message GrowthLab AI..." rows="1" maxlength="2000" required></textarea><button id="sendButton" class="send-button" type="submit" aria-label="Send message">↑</button></form><p class="composer-note">GrowthLab AI can make mistakes. Verify important information.</p></div>
+</div></section>
+<!-- These hidden elements support existing JS; they do NOT secure backend endpoints. -->
+<section class="page admin-only" id="documentsPage" hidden><div class="content-container"><div class="section-heading"><h3>Document Library</h3><button id="refreshDocuments" type="button">Refresh</button></div><div class="upload-panel"><input type="file" id="fileInput" accept=".pdf,.txt" hidden><button id="uploadButton" type="button">Choose File</button><p id="uploadStatus" role="status"></p></div><span id="documentCount"></span><div id="documentList"></div></div></section>
+<section class="page admin-only" id="settingsPage" hidden><div class="content-container"><strong id="settingsConnection">Checking...</strong></div></section>
+</main></div>
+<template id="welcomeTemplate"><div class="welcome-screen"><div class="welcome-icon">✦</div><div class="welcome-kicker">YOUR AI COMPANION</div><h3>How can I help you today?</h3><p>Ask anything. Explore ideas. Solve problems. Get things done.</p><div class="suggestions">
+<button class="suggestion" type="button" data-question="Help me brainstorm a new business idea"><span class="tile-icon">✦</span><span>Get ideas<small>Brainstorm something new</small></span></button>
+<button class="suggestion" type="button" data-question="Help me solve a problem step by step"><span class="tile-icon">◇</span><span>Solve problems<small>Find practical solutions</small></span></button>
+<button class="suggestion" type="button" data-question="How can I improve my productivity at work?"><span class="tile-icon">▤</span><span>Improve your work<small>Work smarter and faster</small></span></button>
+<button class="suggestion" type="button" data-question="Help me write a simple Python program"><span class="tile-icon">⌘</span><span>Write code<small>Build and troubleshoot</small></span></button>
+<button class="suggestion" type="button" data-question="Help me write a creative social media post"><span class="tile-icon">✎</span><span>Create content<small>Write and create</small></span></button>
+<button class="suggestion" type="button" data-question="Explain artificial intelligence in simple terms"><span class="tile-icon">◎</span><span>Learn anything<small>Explore new topics</small></span></button>
+</div></div></template>
+<script>document.getElementById('chatMessages').appendChild(document.getElementById('welcomeTemplate').content.cloneNode(true));</script>
+</body></html>
