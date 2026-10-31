@@ -1,3 +1,4 @@
+from hybrid_ai import HybridAIClient
 import os
 import re
 
@@ -32,7 +33,7 @@ MAX_HISTORY_MESSAGES = 10
 
 app = FastAPI(title="GrowthLab AI Agent", version="2.5.0")
 
-ollama_client = Client(host=os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434"))
+ollama_client = HybridAIClient(Client(host=os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")))
 
 conversation_memory = {}
 

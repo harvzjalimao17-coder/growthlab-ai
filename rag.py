@@ -1,3 +1,4 @@
+from hybrid_ai import HybridAIClient
 import os
 
 from pathlib import Path
@@ -17,7 +18,7 @@ DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
 EMBEDDING_MODEL = "nomic-embed-text"
 CHAT_MODEL = "qwen3:4b"
 
-client = Client(host=os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434"))
+client = HybridAIClient(Client(host=os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")))
 
 _cache_lock = Lock()
 _cache_key = None
