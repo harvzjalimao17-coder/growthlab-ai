@@ -1791,3 +1791,8 @@ def image_view(filename: str, subfolder: str = "", type: str = "output"):
     except urllib.error.URLError:
 
         raise HTTPException(status_code=503, detail="Could not retrieve image from ComfyUI")
+
+
+# GrowthLab AI cloud deployment protection
+from cloud_security import growthlab_cloud_security
+app.middleware("http")(growthlab_cloud_security)
