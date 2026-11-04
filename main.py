@@ -520,6 +520,43 @@ def _growthlab_person_research_query(question, history=None):
     return None, q
 
 
+def _growthlab_multi_person_names(question):
+    """Recognize explicit two-person research requests without guessing names."""
+    import re
+    q = str(question or "").strip()
+    if not re.search(r"\b(search|research|find|look up)\b", q, re.I):
+        return []
+    # Deliberately narrow: avoid routing arbitrary sentences or businesses as people.
+    m = re.search(
+        r"\b(?:search(?:\s+for)?|research|find|look up)\s+(?:for\s+)?"
+        r"([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){1,3}?)"
+        r"\s+and\s+"
+        r"([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){1,3}?)"
+        r"(?=\s+(?:separately|on|in|for|under|with|and\s+show|show|return|provide|list|do\s+not)\b|[.!?]|$)",
+        q, re.I,
+    )
+    if not m:
+        return []
+    names = [re.sub(r"\s+", " ", m.group(i)).strip(" .,!?:;") for i in (1, 2)]
+    return names if all(2 <= len(n.split()) <= 4 for n in names) and names[0].lower() != names[1].lower() else []
+
+
+def _growthlab_multi_person_search(names):
+    """Search each person independently and keep results segregated."""
+    answers, combined = [], []
+    for name in names:
+        try:
+            found = search_web(f'Search for "{name}" on LinkedIn and Facebook')
+        except Exception as exc:
+            logging.warning("Multi-person web search failed for one subject: %s", type(exc).__name__)
+            found = []
+        answers.append(f'### {name}\n\n' + _growthlab_grounded_person_answer(name, found))
+        for item in found or []:
+            if isinstance(item, dict):
+                combined.append({**item, "research_subject": name})
+    return "\n\n---\n\n".join(answers), combined
+
+
 def _growthlab_grounded_person_answer(name, sources):
     """Use retrieved links only; never generate biographical claims from an LLM."""
     import re
@@ -1743,14 +1780,18 @@ def ask(request: AskRequest, http_request: Request):
                 context = None
                 sources = []
 
-        person_name, research_query = _growthlab_person_research_query(question, history)
-        if person_name:
+        multi_names = _growthlab_multi_person_names(question)
+        person_name, research_query = (None, question) if multi_names else _growthlab_person_research_query(question, history)
+        if person_name or multi_names:
             business = False
-        web_attempted = bool(person_name) or needs_web_search(question, business)
+        web_attempted = bool(person_name or multi_names) or needs_web_search(question, business)
 
         web_sources = []
 
-        if web_attempted:
+        if multi_names:
+            answer, web_sources = _growthlab_multi_person_search(multi_names)
+            save_history(session_id, question, answer)
+        elif web_attempted:
 
             try:
 
@@ -1760,7 +1801,9 @@ def ask(request: AskRequest, http_request: Request):
 
                 print(f"Web search unavailable: {type(exc).__name__}: {exc}")
 
-        if person_name:
+        if multi_names:
+            pass  # Already answered using independent, grounded searches.
+        elif person_name:
             answer = _growthlab_grounded_person_answer(person_name, web_sources)
             save_history(session_id, question, answer)
         else:
@@ -2020,8 +2063,9 @@ def ask_stream(request: AskRequest, http_request: Request):
 
         history = get_history(session_id)
 
-        person_name, research_query = _growthlab_person_research_query(question, history)
-        business = (is_business_question(question, history) and not explicit_web_request(question) and not person_name)
+        multi_names = _growthlab_multi_person_names(question)
+        person_name, research_query = (None, question) if multi_names else _growthlab_person_research_query(question, history)
+        business = (is_business_question(question, history) and not explicit_web_request(question) and not person_name and not multi_names)
 
         sources = []
 
@@ -2078,7 +2122,7 @@ def ask_stream(request: AskRequest, http_request: Request):
 
                 yield event("status", message="Reading matching documents..." if sources else "No matching documents found.")
 
-            web_attempted = bool(person_name) or needs_web_search(question, business)
+            web_attempted = bool(person_name or multi_names) or needs_web_search(question, business)
 
             if not web_attempted and not business:
                 budget_detected = detect_budget_request(question) is not None
@@ -2101,13 +2145,13 @@ def ask_stream(request: AskRequest, http_request: Request):
 
                 yield event("status", message="Searching the web...")
 
-                try:
-
-                    web_sources = search_web(research_query if person_name else question)
-
-                except Exception as exc:
-
-                    print(f"Web search unavailable: {type(exc).__name__}: {exc}")
+                if multi_names:
+                    multi_answer, web_sources = _growthlab_multi_person_search(multi_names)
+                else:
+                    try:
+                        web_sources = search_web(research_query if person_name else question)
+                    except Exception as exc:
+                        print(f"Web search unavailable: {type(exc).__name__}: {exc}")
 
                 sources = web_sources
 
@@ -2118,6 +2162,14 @@ def ask_stream(request: AskRequest, http_request: Request):
                 else:
 
                     yield event("status", message=f"Found {len(web_sources)} web sources. Preparing answer...")
+
+            if multi_names:
+                answer = multi_answer
+                yield event("token", text=answer)
+                save_history(session_id, question, answer)
+                yield event("done", answer=answer, sources=web_sources,
+                            session_id=public_session_id, mode="web_search")
+                return
 
             if person_name:
                 answer = _growthlab_grounded_person_answer(person_name, web_sources)
