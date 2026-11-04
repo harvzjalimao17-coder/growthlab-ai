@@ -541,30 +541,16 @@ def _growthlab_multi_person_names(question):
     return names if all(2 <= len(n.split()) <= 4 for n in names) and names[0].lower() != names[1].lower() else []
 
 
-def _growthlab_multi_person_search(names):
-    """Search each person independently and keep results segregated."""
-    answers, combined = [], []
-    for name in names:
-        try:
-            found = search_web(f'Search for "{name}" on LinkedIn and Facebook')
-        except Exception as exc:
-            logging.warning("Multi-person web search failed for one subject: %s", type(exc).__name__)
-            found = []
-        answers.append(f'### {name}\n\n' + _growthlab_grounded_person_answer(name, found))
-        for item in found or []:
-            if isinstance(item, dict):
-                combined.append({**item, "research_subject": name})
-    return "\n\n---\n\n".join(answers), combined
-
-
-def _growthlab_grounded_person_answer(name, sources):
-    """Use retrieved links only; never generate biographical claims from an LLM."""
+def _growthlab_person_evidence(name, sources):
+    """Filter and classify live search hits; no inferred identity or stored data."""
+    from urllib.parse import urlsplit, unquote
     import re
-    from urllib.parse import urlsplit
-    normalized = re.sub(r"\s+", " ", name).strip().strip(".,!?;: ")
+
+    normalized = re.sub(r"\s+", " ", str(name or "")).strip(" .,!?:;")
+    if not normalized:
+        return []
     exact = re.compile(r"(?<![A-Za-z])" + r"\s+".join(re.escape(w) for w in normalized.split()) + r"(?![A-Za-z])", re.I)
-    matches = []
-    seen = set()
+    matches, seen = [], set()
     for item in sources or []:
         if not isinstance(item, dict):
             continue
@@ -576,44 +562,76 @@ def _growthlab_grounded_person_answer(name, sources):
             host = (parsed.hostname or "").lower()
             if parsed.scheme not in ("https", "http") or not host or parsed.username or parsed.password:
                 continue
-        except Exception:
+        except (ValueError, TypeError):
             continue
-        # Require the complete name in the title or search excerpt; separate
-        # first/last names in unrelated passages are not evidence of a match.
-        if not (exact.search(title) or exact.search(snippet)):
-            continue
-        # Treat localized LinkedIn hosts and www hosts as the same profile.
-        canonical_host = host
         if host == "linkedin.com" or host.endswith(".linkedin.com"):
-            canonical_host = "linkedin.com"
+            host_group, platform = "linkedin.com", "LinkedIn"
         elif host == "facebook.com" or host.endswith(".facebook.com"):
-            canonical_host = "facebook.com"
+            host_group, platform = "facebook.com", "Facebook"
         elif host == "pinterest.com" or host.endswith(".pinterest.com"):
-            canonical_host = "pinterest.com"
-        canonical_path = parsed.path.rstrip("/").lower()
-        key = (canonical_host, canonical_path)
+            host_group, platform = "pinterest.com", "Pinterest"
+        else:
+            host_group, platform = host, "Other public source"
+        path = unquote(parsed.path).rstrip("/").lower()
+        key = (host_group, path)
         if key in seen:
             continue
-        seen.add(key)
-        if canonical_host == "linkedin.com":
-            kind = "LinkedIn"
-            priority = 0 if canonical_path.startswith("/in/") else 2
-        elif canonical_host == "facebook.com":
-            kind = "Facebook"
-            priority = 1 if not canonical_path.startswith("/groups/") else 3
+        in_title = bool(exact.search(title))
+        # Search snippets can contain unrelated sidebar recommendations. Accept
+        # snippet-only social matches only when the name is near the beginning.
+        in_lead = bool(exact.search(snippet[:120]))
+        if not (in_title or in_lead):
+            continue
+        direct_profile = (
+            (host_group == "linkedin.com" and path.startswith("/in/"))
+            or (host_group == "pinterest.com" and path.count("/") == 1 and path != "/")
+            or (host_group == "facebook.com" and (path.startswith("/profile.php") or path.count("/") == 1))
+        )
+        if direct_profile and in_title:
+            label, priority = "Possible matching profile (unverified)", 0
+        elif in_title:
+            label, priority = "Page title matches name (identity unverified)", 1
+        elif host_group in ("facebook.com", "linkedin.com", "pinterest.com"):
+            label, priority = "Name mentioned in search excerpt (unverified)", 2
         else:
-            kind = "Other public result"
-            priority = 4
-        matches.append((priority, kind, title[:150] or host, url))
-    matches.sort(key=lambda entry: entry[0])
-    matches = matches[:8]
-    if not matches:
-        return (f'No search result containing the exact name **{normalized}** was confirmed in this live search. '
-                'This does not prove that no public profile exists. Try adding a location or employer.')
+            # A name appearing in a general document excerpt is not enough to
+            # attribute the document to that person.
+            continue
+        seen.add(key)
+        matches.append((priority, platform, label, title[:150] or host, url, item))
+    matches.sort(key=lambda entry: (entry[0], entry[1], entry[3].lower()))
+    return matches[:8]
+
+
+def _growthlab_multi_person_search(names):
+    """Search each person independently and return only matched sources."""
+    answers, combined = [], []
+    for name in names:
+        try:
+            found = search_web(f'Search for "{name}" on LinkedIn and Facebook')
+        except Exception as exc:
+            logging.warning("Multi-person web search failed for one subject: %s", type(exc).__name__)
+            found = []
+        evidence = _growthlab_person_evidence(name, found)
+        answers.append(f'### {name}\n\n' + _growthlab_grounded_person_answer(name, found))
+        for entry in evidence:
+            combined.append({**entry[-1], "research_subject": name})
+    return "\n\n---\n\n".join(answers), combined
+
+
+def _growthlab_grounded_person_answer(name, sources):
+    """Present source relevance, never assert a real-world identity from a name."""
+    import re
+    normalized = re.sub(r"\s+", " ", str(name or "")).strip(" .,!?:;")
+    evidence = _growthlab_person_evidence(normalized, sources)
+    if not evidence:
+        return (f'No sufficiently relevant public search result for **{normalized}** was found in this live search. '
+                'This does not establish that no profile exists or that an identity was verified.')
     lines = [f'Live public search results mentioning **{normalized}**:', '']
-    for _, kind, title, url in matches:
-        lines.append(f'- **{kind} — {title}**: {url}')
-    lines.extend(['', 'These are retrieved public links, not verified identities. A group post or mention is not proof of an account owner, job title, employer, or biography. No other personal details have been inferred.'])
+    for _, platform, label, title, url, _ in evidence:
+        # URLs are retrieved from live search; no generated profiles or biographies.
+        lines.append(f'- **{platform} — {title}**: {url} — *{label}*')
+    lines.extend(['', 'These are search-result matches, not confirmed identities. Matching names, profile titles, and excerpts do not verify account ownership, employment, or biography.'])
     return "\n".join(lines)
 
 
@@ -1805,6 +1823,7 @@ def ask(request: AskRequest, http_request: Request):
             pass  # Already answered using independent, grounded searches.
         elif person_name:
             answer = _growthlab_grounded_person_answer(person_name, web_sources)
+            web_sources = [entry[-1] for entry in _growthlab_person_evidence(person_name, web_sources)]
             save_history(session_id, question, answer)
         else:
             answer = generate_ai_answer(
@@ -2173,6 +2192,7 @@ def ask_stream(request: AskRequest, http_request: Request):
 
             if person_name:
                 answer = _growthlab_grounded_person_answer(person_name, web_sources)
+                web_sources = [entry[-1] for entry in _growthlab_person_evidence(person_name, web_sources)]
                 yield event("token", text=answer)
                 save_history(session_id, question, answer)
                 yield event("done", answer=answer, sources=web_sources,
