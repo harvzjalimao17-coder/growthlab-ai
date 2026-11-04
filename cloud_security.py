@@ -1,4 +1,4 @@
-﻿import os
+import os
 import secrets
 import logging
 
@@ -25,6 +25,17 @@ BLOCKED_DOC_PATHS = {
     "/openapi.json",
     "/docs/oauth2-redirect",
 }
+
+# This address is used only after Supabase validates the access token.
+ADMIN_EMAIL = "harvzjalimao17@gmail.com"
+REGULAR_USER_DAILY_LIMIT = 20
+
+
+def _verified_email(user):
+    """Read an email only from the trusted Supabase verification result."""
+    if isinstance(user, dict):
+        return str(user.get("email") or "").strip().casefold()
+    return str(getattr(user, "email", "") or "").strip().casefold()
 
 
 async def growthlab_cloud_security(request: Request, call_next):
@@ -70,23 +81,34 @@ async def growthlab_cloud_security(request: Request, call_next):
 
     token = credential.strip()
 
+    # Preserve existing deployment-token administrator access.
     if secrets.compare_digest(token, expected):
         request.state.growthlab_role = "admin"
         return await call_next(request)
 
-    if path not in CHAT_PATHS:
-        return JSONResponse(
-            {"detail": "Administrator access required"},
-            status_code=403,
-        )
-
+    # All other tokens must be verified by Supabase. Never trust an email
+    # supplied in the request body, headers, or unverified JWT contents.
     try:
         user = verify_supabase_user(token)
+        user_id = user["id"] if isinstance(user, dict) else user.id
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid user account")
 
-        request.state.growthlab_role = "user"
-        request.state.growthlab_user_id = user["id"]
+        request.state.growthlab_user_id = user_id
+        is_admin = secrets.compare_digest(_verified_email(user), ADMIN_EMAIL)
 
-        consume_chat_request(user["id"], daily_limit=20)
+        if is_admin:
+            request.state.growthlab_role = "admin"
+            # No application-level daily limit for the verified admin.
+            # Provider-side rate limits and quotas still apply.
+        else:
+            request.state.growthlab_role = "user"
+            if path not in CHAT_PATHS:
+                return JSONResponse(
+                    {"detail": "Administrator access required"},
+                    status_code=403,
+                )
+            consume_chat_request(user_id, daily_limit=REGULAR_USER_DAILY_LIMIT)
 
     except HTTPException as exc:
         return JSONResponse(
