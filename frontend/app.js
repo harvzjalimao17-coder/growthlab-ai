@@ -380,7 +380,13 @@ async function checkConnection() {
 
     const data = await apiRequest("/health");
 
-    if (data.status === "ok" && data.ollama === "connected") {
+    if (
+      data.status === "ok" &&
+      (
+        data.ollama === "connected" ||
+        data.ai === "cloud"
+      )
+    ) {
 
       connectionText.textContent = "AI Connected";
 
@@ -728,11 +734,18 @@ async function sendQuestion(question) {
 
   try {
 
+    const authHeaders = { "Content-Type": "application/json" };
+
+    if (window.growthlabAuth?.cloudMode()) {
+      const accessToken = await window.growthlabAuth.getAccessToken();
+      authHeaders["Authorization"] = `Bearer ${accessToken}`;
+    }
+
     const response = await fetch(`${API_BASE}/ask/stream`, {
 
       method: "POST",
 
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders,
 
       body: JSON.stringify({ question: trimmedQuestion, session_id: growthlabSessionId })
 

@@ -1,0 +1,180 @@
+﻿.gl-auth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: #090b0e;
+  color: #f5f5f5;
+  font-family: Inter, system-ui, -apple-system, sans-serif;
+}
+
+.gl-auth-overlay[hidden],
+.gl-auth-account[hidden] {
+  display: none !important;
+}
+
+.gl-auth-card {
+  width: 100%;
+  max-width: 420px;
+  padding: 36px;
+  background: #12161c;
+  border: 1px solid #292f38;
+  border-radius: 20px;
+  box-shadow: 0 24px 70px rgba(0,0,0,.4);
+}
+
+.gl-auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 30px;
+}
+
+.gl-auth-logo {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 13px;
+  background: #d62839;
+  color: white;
+  font-size: 25px;
+  font-weight: 800;
+}
+
+.gl-auth-brand h2 {
+  margin: 0;
+  font-size: 23px;
+}
+
+.gl-auth-brand h2 span {
+  color: #f04455;
+}
+
+.gl-auth-brand p,
+.gl-auth-subtitle {
+  color: #9ba3af;
+  font-size: 13px;
+}
+
+.gl-auth-title {
+  margin: 0 0 8px;
+  font-size: 25px;
+}
+
+.gl-auth-subtitle {
+  margin: 0 0 24px;
+  line-height: 1.6;
+}
+
+.gl-auth-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.gl-auth-tab {
+  padding: 12px;
+  background: #1c222b;
+  border: 1px solid #303743;
+  border-radius: 9px;
+  color: #aab2be;
+  cursor: pointer;
+}
+
+.gl-auth-tab.active {
+  background: #d62839;
+  border-color: #d62839;
+  color: white;
+}
+
+.gl-auth-field {
+  display: block;
+  margin-bottom: 17px;
+}
+
+.gl-auth-field span {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.gl-auth-field input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 13px 14px;
+  background: #090d12;
+  border: 1px solid #333b46;
+  border-radius: 9px;
+  color: white;
+  font: inherit;
+}
+
+.gl-auth-field input:focus {
+  outline: 2px solid #d62839;
+  outline-offset: 1px;
+}
+
+.gl-auth-submit {
+  width: 100%;
+  margin-top: 6px;
+  padding: 14px;
+  background: #d62839;
+  border: 0;
+  border-radius: 9px;
+  color: white;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.gl-auth-submit:disabled {
+  opacity: .6;
+  cursor: wait;
+}
+
+.gl-auth-message {
+  min-height: 20px;
+  margin: 16px 0 0;
+  color: #ff8792;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.gl-auth-message.success {
+  color: #74d8a2;
+}
+
+.gl-auth-account {
+  padding: 14px;
+  margin-top: 14px;
+  border: 1px solid #303743;
+  border-radius: 10px;
+  overflow-wrap: anywhere;
+}
+
+.gl-auth-account-email {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: #c5ccd5;
+}
+
+.gl-auth-logout {
+  padding: 9px 12px;
+  border: 1px solid #49515d;
+  border-radius: 8px;
+  background: transparent;
+  color: #f5f5f5;
+  cursor: pointer;
+}
+
+@media (max-width: 480px) {
+  .gl-auth-card {
+    padding: 24px;
+  }
+}

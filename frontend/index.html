@@ -3,8 +3,60 @@
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#090b0e"><title>GrowthLab AI | Your AI Assistant</title>
 <link rel="icon" type="image/png" href="./favicon.png">
-<link rel="stylesheet" href="./style.css"><script src="./app.js" defer></script>
+<link rel="stylesheet" href="./style.css">
+<link rel="stylesheet" href="/assets/auth.css">
+<script src="/assets/auth.js" defer></script>
+<script src="/assets/auth-ui.js" defer></script>
+<script src="./app.js" defer></script>
 </head><body>
+<div class="gl-auth-overlay" id="glAuthOverlay" hidden>
+  <div class="gl-auth-card">
+    <div class="gl-auth-brand">
+      <div class="gl-auth-logo">G</div>
+      <div>
+        <h2>GrowthLab <span>AI</span></h2>
+        <p>Your intelligent assistant</p>
+      </div>
+    </div>
+
+    <h3 class="gl-auth-title" id="glAuthTitle">Welcome back</h3>
+    <p class="gl-auth-subtitle" id="glAuthSubtitle">
+      Sign in to continue using GrowthLab AI.
+    </p>
+
+    <div class="gl-auth-tabs">
+      <button class="gl-auth-tab active" id="glLoginTab" type="button">
+        Log In
+      </button>
+      <button class="gl-auth-tab" id="glSignupTab" type="button">
+        Sign Up
+      </button>
+    </div>
+
+    <form id="glAuthForm">
+      <label class="gl-auth-field">
+        <span>Email address</span>
+        <input id="glAuthEmail" type="email" autocomplete="email"
+               placeholder="you@example.com" required>
+      </label>
+
+      <label class="gl-auth-field">
+        <span>Password</span>
+        <input id="glAuthPassword" type="password"
+               autocomplete="current-password"
+               minlength="6" required>
+      </label>
+
+      <button class="gl-auth-submit" id="glAuthSubmit" type="submit">
+        Log In
+      </button>
+
+      <p class="gl-auth-message" id="glAuthMessage" role="status"></p>
+    </form>
+  </div>
+</div>
+
+
 <div class="app-shell">
 <aside class="sidebar" id="sidebar">
   <div class="brand"><div class="brand-icon">G</div><div><h1>GrowthLab <span>AI</span></h1><p>Your intelligent assistant</p></div></div>

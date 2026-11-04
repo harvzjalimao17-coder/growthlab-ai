@@ -1,4 +1,4 @@
-﻿import os
+import os
 from types import SimpleNamespace
 
 import requests
@@ -86,3 +86,6 @@ class HybridAIClient:
                 response.close()
 
         return generate()
+
+    def list(self):
+        return self.local_client.list()
