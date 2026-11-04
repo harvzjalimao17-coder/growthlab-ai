@@ -567,8 +567,46 @@ def _general_web_search(query, max_results=5):
     searches = list(dict.fromkeys(searches))
     platform_results = {"linkedin": 0, "facebook": 0}
 
+    # Tavily is optional: no profile database, no search-result persistence.
+    # Set TAVILY_API_KEY in Render environment variables to enable it.
+    tavily_key = os.getenv("TAVILY_API_KEY", "").strip()
+    tavily_calls = 0
+
     def search_once(search_query, platform, limit):
+        nonlocal tavily_calls
         before = len(results)
+        if tavily_key and tavily_calls < 3:
+            tavily_calls += 1
+            try:
+                import requests
+                response = requests.post(
+                    "https://api.tavily.com/search",
+                    json={
+                        "api_key": tavily_key,
+                        "query": search_query,
+                        "search_depth": "basic",
+                        "max_results": 10,
+                        "include_answer": False,
+                        "include_raw_content": False,
+                        "include_images": False,
+                    },
+                    timeout=12,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                for item in payload.get("results", []):
+                    if not isinstance(item, dict):
+                        continue
+                    add_result(item.get("title"), item.get("url"), item.get("content"), "Tavily", platform)
+                    if len(results) - before >= limit:
+                        break
+                logging.warning("[SEARCH] Tavily accepted=%s platform=%s", len(results) - before, platform or "general")
+            except Exception as exc:
+                # Never print API keys or request bodies to logs.
+                logging.warning("[SEARCH] Tavily request failed: %s", type(exc).__name__)
+        if len(results) - before >= limit:
+            logging.warning("[SEARCH] query=%r platform=%s accepted=%s", search_query, platform or "general", len(results) - before)
+            return len(results) - before
         try:
             from ddgs import DDGS
             # Let DDGS choose and fall back across available engines.
