@@ -476,27 +476,28 @@ def _clean_live_search_query(query):
 
 
 def _person_search_subject(query):
-    """Extract a likely named person without treating requested output fields as a name."""
+    """Extract a person from a social-profile request, excluding output instructions."""
     text = str(query or "").strip()
-    text = re.sub(r"^(?:please\s+)?(?:find|search(?:\s+for)?|look\s+up|research|identify)\s+", "", text, flags=re.I)
-    # The first comma or profile/role request ends the subject, not the person's name.
+    # Only interpret an unquoted phrase as a name when the request has person/profile intent.
+    profile_intent = bool(re.search(r"\b(linkedin|facebook|profiles?|accounts?|person|people)\b", text, re.I))
+    if not profile_intent:
+        return None
+    quoted = re.search(r"[\"“]([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){1,3})[\"”]", text)
+    if quoted:
+        return quoted.group(1)
+    text = re.sub(r"^(?:(?:please|can you|could you)\s+)*", "", text, flags=re.I)
+    text = re.sub(r"^(?:(?:search(?:\s+the\s+web)?(?:\s+for)?|find|look\s+up|research|identify)\s+)+", "", text, flags=re.I)
+    # A person may be followed by 'on LinkedIn', 'in Facebook', or instructions.
     text = re.split(
-        r",|\s+\b(?:who\s+is|(?:the\s+)?(?:ceo|founder|chairman|president|director|executive|owner)\s+of|"
-        r"(?:official\s+)?(?:linkedin|facebook|profile|current\s+position|company|sources?|links?)\b)",
+        r"\s+(?:on|in|at|from)\s+(?:linkedin|facebook)\b|"
+        r"[,.;!?]|"
+        r"\s+(?:and\s+)?(?:return|provide|give|show|list|include|with|who|whose)\b|"
+        r"\s+(?:linkedin|facebook|profiles?|accounts?)\b",
         text, maxsplit=1, flags=re.I,
-    )[0]
+    )[0].strip()
     words = re.findall(r"[A-Za-z][A-Za-z.'-]*", text)
-    if 2 <= len(words) <= 4 and all(len(word) > 1 and word[0].isupper() for word in words):
+    if 2 <= len(words) <= 4 and all(len(word) > 1 for word in words):
         return " ".join(words)
-    # Lowercase names are common in chat; recognize explicit platform requests.
-    platform_match = re.match(
-        r"^(?:please\s+)?(?:find|search(?:\s+for)?|look\s+up|research)\s+"
-        r"([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){1,3})"
-        r"\s+(?:in|on)\s+(?:linkedin|facebook)\b",
-        str(query or "").strip(), re.I,
-    )
-    if platform_match:
-        return platform_match.group(1)
     return None
 
 
@@ -552,9 +553,14 @@ def _general_web_search(query, max_results=5):
     # This avoids LinkedIn results filling the quota before Facebook is searched.
     searches = []
     if wants_linkedin and name_tokens:
-        searches.append((" ".join(name_tokens) + " site:linkedin.com/in/", "linkedin"))
+        searches.append(('"' + person_name + '" site:linkedin.com/in/' if person_name else " ".join(name_tokens) + " site:linkedin.com/in/", "linkedin"))
     if wants_facebook and name_tokens:
-        searches.append((" ".join(name_tokens) + " site:facebook.com", "facebook"))
+        searches.append(('"' + person_name + '" site:facebook.com' if person_name else " ".join(name_tokens) + " site:facebook.com", "facebook"))
+    if person_name and (wants_linkedin or wants_facebook):
+        if wants_linkedin:
+            searches.append((person_name + " LinkedIn", "linkedin"))
+        if wants_facebook:
+            searches.append((person_name + " Facebook", "facebook"))
     if person_name:
         searches.append((person_name + " official biography", None))
     searches.append((query, None))
@@ -595,8 +601,8 @@ def _general_web_search(query, max_results=5):
 
     for search_query, platform in searches:
         # Always check every explicitly requested platform, even if another has results.
-        if platform:
-            platform_results[platform] += search_once(search_query, platform, max(2, max_results))
+        if platform and platform_results[platform] == 0:
+            platform_results[platform] += search_once(search_query, platform, 2)
         elif len(results) < max_results:
             search_once(search_query, None, max_results - len(results))
     logging.warning("[SEARCH] final_results=%s linkedin=%s facebook=%s query=%r",
