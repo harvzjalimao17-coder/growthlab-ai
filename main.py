@@ -488,31 +488,37 @@ def _person_search_subject(query):
     words = re.findall(r"[A-Za-z][A-Za-z.'-]*", text)
     if 2 <= len(words) <= 4 and all(len(word) > 1 and word[0].isupper() for word in words):
         return " ".join(words)
+    # Lowercase names are common in chat; recognize explicit platform requests.
+    platform_match = re.match(
+        r"^(?:please\s+)?(?:find|search(?:\s+for)?|look\s+up|research)\s+"
+        r"([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){1,3})"
+        r"\s+(?:in|on)\s+(?:linkedin|facebook)\b",
+        str(query or "").strip(), re.I,
+    )
+    if platform_match:
+        return platform_match.group(1)
     return None
 
 
 def _general_web_search(query, max_results=5):
-    """Search supported DDGS engines and RSS; reject unrelated profile results."""
+    """Search public web live, checking each requested social platform separately."""
     from urllib.parse import urlparse, urlencode, unquote
     from urllib.request import Request, urlopen
     import xml.etree.ElementTree as ET
 
-    results, seen = [], set()
     query = _clean_live_search_query(query)
     wants_linkedin = bool(re.search(r"\blinkedin\b", query, re.I))
     wants_facebook = bool(re.search(r"\bfacebook\b", query, re.I))
     person_name = _person_search_subject(query)
     wants_profile = bool(re.search(r"\b(profile|account)\b", query, re.I)) or bool(person_name and (wants_linkedin or wants_facebook))
-    # For person research, match the person's name, not requested answer fields.
     name_tokens = ([w.lower() for w in person_name.split()] if person_name else
                    [t for t in _search_subject_tokens(query)
                     if t not in {"linkedin", "facebook", "profile", "account", "profiles", "accounts"}])
     name_tokens = list(dict.fromkeys(name_tokens))
+    results, seen = [], set()
 
-    def add_result(title, url, snippet, provider):
-        title = str(title or "").strip()
-        url = str(url or "").strip()
-        snippet = str(snippet or "").strip()
+    def add_result(title, url, snippet, provider, platform=None):
+        title, url, snippet = (str(v or "").strip() for v in (title, url, snippet))
         try:
             parsed = urlparse(url)
             host = (parsed.hostname or "").lower()
@@ -524,78 +530,92 @@ def _general_web_search(query, max_results=5):
             return
         if not title or url in seen:
             return
-        candidate = {"type": "web", "title": title[:180], "url": url,
-                     "snippet": (provider + " search excerpt (not full webpage): " + snippet)[:850]}
-        if wants_profile and (wants_linkedin or wants_facebook) and not person_name:
-            # A Wikipedia page about LinkedIn is not someone's LinkedIn profile.
-            is_linkedin = host == "linkedin.com" or host.endswith(".linkedin.com")
-            is_facebook = host == "facebook.com" or host.endswith(".facebook.com")
-            if not ((wants_linkedin and is_linkedin) or (wants_facebook and is_facebook)):
-                return
-            text = re.sub(r"[^a-z0-9]+", " ", unquote(title + " " + url + " " + snippet).lower())
-            if name_tokens and not all(re.search(r"\b" + re.escape(t) + r"\b", text) for t in name_tokens):
-                return
-            # Search results are candidates, not verified ownership of an account.
-        elif person_name:
-            # Company biographies and professional pages need the person's name,
-            # not every instruction in the user's full question.
-            text = re.sub(r"[^a-z0-9]+", " ", unquote(title + " " + url + " " + snippet).lower())
-            if not all(re.search(r"\b" + re.escape(t) + r"\b", text) for t in name_tokens):
-                return
-        elif not _result_matches_subject(candidate, query):
+        is_linkedin = host == "linkedin.com" or host.endswith(".linkedin.com")
+        is_facebook = host == "facebook.com" or host.endswith(".facebook.com")
+        if platform == "linkedin" and (not is_linkedin or "/in/" not in parsed.path.lower()):
             return
+        if platform == "facebook" and not is_facebook:
+            return
+        if person_name or (wants_profile and (wants_linkedin or wants_facebook)):
+            content = re.sub(r"[^a-z0-9]+", " ", unquote(title + " " + url + " " + snippet).lower())
+            if name_tokens and not all(re.search(r"\b" + re.escape(t) + r"\b", content) for t in name_tokens):
+                return
+        else:
+            candidate = {"title": title, "url": url, "snippet": snippet}
+            if not _result_matches_subject(candidate, query):
+                return
         seen.add(url)
-        results.append(candidate)
+        results.append({"type": "web", "title": title[:180], "url": url,
+                        "snippet": (provider + " search excerpt (not full webpage): " + snippet)[:850]})
 
-    queries = [query]
+    # Explicit platform queries are searched independently, before general results.
+    # This avoids LinkedIn results filling the quota before Facebook is searched.
+    searches = []
+    if wants_linkedin and name_tokens:
+        searches.append((" ".join(name_tokens) + " site:linkedin.com/in/", "linkedin"))
+    if wants_facebook and name_tokens:
+        searches.append((" ".join(name_tokens) + " site:facebook.com", "facebook"))
     if person_name:
-        # Search the profile and a separate independent biography/source.
-        queries = [person_name + " site:linkedin.com/in/", person_name + " official biography", query] if wants_linkedin else [person_name + " official biography", query]
-        if wants_facebook and not wants_linkedin:
-            queries.insert(0, person_name + " site:facebook.com")
-    elif wants_profile and wants_linkedin and name_tokens:
-        queries.insert(0, " ".join(name_tokens) + " site:linkedin.com/in/")
-    elif wants_profile and wants_facebook and name_tokens:
-        queries.insert(0, " ".join(name_tokens) + " site:facebook.com")
+        searches.append((person_name + " official biography", None))
+    searches.append((query, None))
+    searches = list(dict.fromkeys(searches))
+    platform_results = {"linkedin": 0, "facebook": 0}
 
-    try:
-        from ddgs import DDGS
-        # These are supported by the installed ddgs version reported by Render.
-        for search_query in queries:
-            for backend in ("brave", "startpage", "yahoo", "mojeek", "duckduckgo"):
-                try:
-                    raw = DDGS(timeout=7).text(search_query, region="us-en", max_results=12, backend=backend)
-                    before = len(results)
-                    for item in raw or []:
-                        if isinstance(item, dict):
-                            add_result(item.get("title"), item.get("href"), item.get("body"), backend)
-                        if len(results) >= max_results:
-                            break
-                    logging.warning("[SEARCH] backend=%s accepted=%s query=%r", backend, len(results)-before, search_query)
-                    if len(results) >= max_results:
-                        return results[:max_results]
-                except Exception as exc:
-                    logging.warning("[SEARCH] backend=%s failed: %s", backend, str(exc)[:150])
-    except ImportError:
-        logging.warning("[SEARCH] ddgs package not installed")
-
-    for search_query in queries:
-        if len(results) >= max_results:
-            break
+    def search_once(search_query, platform, limit):
+        before = len(results)
         try:
-            url = "https://www.bing.com/search?" + urlencode({"q": search_query, "format": "rss"})
-            req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/rss+xml, application/xml, text/xml"})
-            with urlopen(req, timeout=9) as response:
-                root = ET.fromstring(response.read(400000))
-            before = len(results)
-            for item in root.findall(".//item"):
-                add_result(item.findtext("title"), item.findtext("link"), item.findtext("description"), "Bing RSS")
-                if len(results) >= max_results:
-                    break
-            logging.warning("[SEARCH] Bing RSS accepted=%s query=%r", len(results)-before, search_query)
-        except Exception as exc:
-            logging.warning("[SEARCH] Bing RSS failed: %s", str(exc)[:150])
-    logging.warning("[SEARCH] final_results=%s query=%r", len(results), query)
+            from ddgs import DDGS
+            # Let DDGS choose and fall back across available engines.
+            try:
+                raw = DDGS(timeout=9).text(search_query, region="us-en", max_results=12, backend="auto")
+                for item in raw or []:
+                    if isinstance(item, dict):
+                        add_result(item.get("title"), item.get("href"), item.get("body"), "DDGS", platform)
+                        if len(results) - before >= limit:
+                            break
+            except Exception as exc:
+                logging.warning("[SEARCH] DDGS failed query=%r error=%s", search_query, str(exc)[:150])
+        except ImportError:
+            logging.warning("[SEARCH] ddgs package not installed")
+        if len(results) - before < limit:
+            try:
+                url = "https://www.bing.com/search?" + urlencode({"q": search_query, "format": "rss"})
+                req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/rss+xml, application/xml, text/xml"})
+                with urlopen(req, timeout=9) as response:
+                    root = ET.fromstring(response.read(400000))
+                for item in root.findall(".//item"):
+                    add_result(item.findtext("title"), item.findtext("link"), item.findtext("description"), "Bing RSS", platform)
+                    if len(results) - before >= limit:
+                        break
+            except Exception as exc:
+                logging.warning("[SEARCH] Bing RSS failed query=%r error=%s", search_query, str(exc)[:150])
+        accepted = len(results) - before
+        logging.warning("[SEARCH] query=%r platform=%s accepted=%s", search_query, platform or "general", accepted)
+        return accepted
+
+    for search_query, platform in searches:
+        # Always check every explicitly requested platform, even if another has results.
+        if platform:
+            platform_results[platform] += search_once(search_query, platform, max(2, max_results))
+        elif len(results) < max_results:
+            search_once(search_query, None, max_results - len(results))
+    logging.warning("[SEARCH] final_results=%s linkedin=%s facebook=%s query=%r",
+                    len(results), platform_results["linkedin"], platform_results["facebook"], query)
+    # Allow one result from each requested platform before filling with other sources.
+    if wants_linkedin and wants_facebook:
+        selected, selected_urls = [], set()
+        for domain in ("linkedin.com", "facebook.com"):
+            match = next((item for item in results if (urlparse(item["url"]).hostname or "").lower().endswith(domain)), None)
+            if match and match["url"] not in selected_urls:
+                selected.append(match)
+                selected_urls.add(match["url"])
+        for item in results:
+            if len(selected) >= max_results:
+                break
+            if item["url"] not in selected_urls:
+                selected.append(item)
+                selected_urls.add(item["url"])
+        return selected
     return results[:max_results]
 
 
@@ -1814,6 +1834,13 @@ def _growthlab_clean_web_answer(answer, sources):
     # Remove obviously truncated Markdown link fragments (e.g. [[https://www).
     answer = re.sub(r"\[+\s*\[?\s*\[link omitted\]", "[link omitted]", answer)
 
+    # Use only a retrieved URL to replace a model-generated placeholder.
+    if "[link omitted]" in answer:
+        urls = [str(item.get("url") or "") for item in (sources or []) if isinstance(item, dict)]
+        profile_url = next((url for url in urls if re.match(r"https://(?:[a-z]+\.)?linkedin\.com/in/", url, re.I)), None)
+        if profile_url and re.search(r"linkedin|profile", answer, re.I):
+            answer = answer.replace("[link omitted]", profile_url, 1)
+        answer = re.sub(r"(?m)^\s*[-*]?\s*(?:URL|Link):\s*\[link omitted\]\s*$", "", answer)
     trusted = []
     seen = set()
     for item in sources or []:
