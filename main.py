@@ -678,7 +678,7 @@ def _growthlab_deep_person_research(name, question):
     """
     import re
     import requests
-    from urllib.parse import urlsplit
+    from urllib.parse import urlsplit, urlunsplit
     key = os.getenv('TAVILY_API_KEY', '').strip()
     if not key:
         return ('Deeper live research is unavailable because Tavily is not configured.', [])
@@ -737,8 +737,22 @@ def _growthlab_deep_person_research(name, question):
             }, timeout=20)
             r.raise_for_status()
             for item in r.json().get('results', []):
-                if isinstance(item, dict) and item.get('url') and item.get('raw_content'):
-                    extraction[item['url']] = str(item['raw_content'])[:12000]
+                if not isinstance(item, dict) or not item.get('url') or not item.get('raw_content'):
+                    continue
+                # Never attach extracted text to a different result URL.
+                extracted_url = str(item['url']).strip()
+                def _source_key(value):
+                    parts = urlsplit(str(value).strip())
+                    host = (parts.hostname or '').lower()
+                    if host.startswith('www.'):
+                        host = host[4:]
+                    if host.startswith('ph.linkedin.com'):
+                        host = 'linkedin.com'
+                    return host, parts.path.rstrip('/').lower()
+                for entry in candidates:
+                    if _source_key(entry[4]) == _source_key(extracted_url):
+                        extraction[entry[4]] = str(item['raw_content'])[:12000]
+                        break
         except Exception as exc:
             logging.warning('[DEEP RESEARCH] Extract failed: %s', type(exc).__name__)
     if not matches:
@@ -749,16 +763,21 @@ def _growthlab_deep_person_research(name, question):
         body = extraction.get(url, '')
         snippet = str(item.get('snippet') or '')
         source_text = body if body else (title + ' ' + snippet)
-        basis = 'extracted page text' if body else 'search snippet only (page not verified)'
-        status, supporting_quote, verification = _growthlab_classify_research_evidence(
-            name, topic, source_text)
-        if body and status == 'No relevant topic evidence found in available text':
-            snippet_status, snippet_quote, snippet_verification = _growthlab_classify_research_evidence(
+        if body:
+            status, supporting_quote, verification = _growthlab_classify_research_evidence(
+                name, topic, body)
+            basis = 'extracted page text matched to this URL'
+        else:
+            # A search provider may attach context from a related post or page.
+            # Snippets alone must not be treated as evidence *from* this URL.
+            preliminary, supporting_quote, _ = _growthlab_classify_research_evidence(
                 name, topic, title + ' ' + snippet)
-            if snippet_status != 'No relevant topic evidence found in available text':
-                status, supporting_quote, verification = snippet_status, snippet_quote, snippet_verification
-                basis = 'search snippet only (extracted page did not establish connection)'
-        excerpt = re.sub(r'\s+', ' ', source_text).strip()
+            status = ('Potential topic match in search preview (URL-content association unconfirmed)'
+                      if preliminary != 'No relevant topic evidence found in available text'
+                      else 'No relevant topic evidence in search preview')
+            verification = 'Search preview only; source page not independently inspected'
+            basis = 'unverified search preview'
+        excerpt = re.sub(r'\\s+', ' ', source_text).strip()
         lines.extend([f'- **{platform} — {title[:130] or url}**',
                       f'  - URL: {url}',
                       f'  - Evidence: {status} ({basis})',
