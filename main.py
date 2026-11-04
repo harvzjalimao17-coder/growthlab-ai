@@ -714,6 +714,17 @@ def _growthlab_deep_person_research(name, question):
     if not success:
         return ('Live research searches failed. No conclusion about public evidence can be drawn.', [])
     matches = _growthlab_person_evidence(name, found)
+    # Deep research is about the subject, not pages that merely quote or
+    # recommend the subject. Keep direct name-titled results; permit authored
+    # LinkedIn posts only when the post URL contains the exact name slug.
+    from urllib.parse import urlsplit
+    name_slug = '-'.join(name.lower().split())
+    exact_title = re.compile(r'(?<![A-Za-z])' + r'\s+'.join(re.escape(w) for w in name.split()) + r'(?![A-Za-z])', re.I)
+    matches = [entry for entry in matches if (
+        exact_title.search(entry[3]) or
+        (urlsplit(entry[4]).hostname or '').lower().endswith('linkedin.com')
+        and urlsplit(entry[4]).path.lower().startswith('/posts/' + name_slug + '_')
+    )]
     # Page extraction is attempted for the most relevant direct profiles and
     # company-related results; inaccessible pages stay snippet-only.
     extraction = {}
@@ -1991,7 +2002,7 @@ def ask(request: AskRequest, http_request: Request):
 
         if web_attempted:
 
-            sources = web_sources
+            sources = [] if (deep_name or multi_names or person_name) else web_sources
 
         return {
 
@@ -2347,7 +2358,7 @@ def ask_stream(request: AskRequest, http_request: Request):
                 answer = deep_answer
                 yield event("token", text=answer)
                 save_history(session_id, question, answer)
-                yield event("done", answer=answer, sources=web_sources,
+                yield event("done", answer=answer, sources=[],
                             session_id=public_session_id, mode="web_search")
                 return
 
@@ -2355,7 +2366,7 @@ def ask_stream(request: AskRequest, http_request: Request):
                 answer = multi_answer
                 yield event("token", text=answer)
                 save_history(session_id, question, answer)
-                yield event("done", answer=answer, sources=web_sources,
+                yield event("done", answer=answer, sources=[],
                             session_id=public_session_id, mode="web_search")
                 return
 
@@ -2364,7 +2375,7 @@ def ask_stream(request: AskRequest, http_request: Request):
                 web_sources = [entry[-1] for entry in _growthlab_person_evidence(person_name, web_sources)]
                 yield event("token", text=answer)
                 save_history(session_id, question, answer)
-                yield event("done", answer=answer, sources=web_sources,
+                yield event("done", answer=answer, sources=[],
                             session_id=public_session_id, mode="web_search")
                 return
 
