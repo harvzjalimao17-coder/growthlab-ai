@@ -476,16 +476,25 @@ def _clean_live_search_query(query):
 
 
 def _general_web_search(query, max_results=5):
-    """Try independent public search backends, rejecting empty and off-topic hits."""
-    from urllib.parse import urlparse, urlencode
+    """Search supported DDGS engines and RSS; reject unrelated profile results."""
+    from urllib.parse import urlparse, urlencode, unquote
     from urllib.request import Request, urlopen
     import xml.etree.ElementTree as ET
 
     results, seen = [], set()
     query = _clean_live_search_query(query)
+    wants_linkedin = bool(re.search(r"\blinkedin\b", query, re.I))
+    wants_facebook = bool(re.search(r"\bfacebook\b", query, re.I))
+    wants_profile = bool(re.search(r"\b(profile|account)\b", query, re.I))
+    # Keep the person's name as the essential search target.
+    name_tokens = [t for t in _search_subject_tokens(query)
+                   if t not in {"linkedin", "facebook", "profile", "account", "profiles", "accounts"}]
+    name_tokens = list(dict.fromkeys(name_tokens))
 
     def add_result(title, url, snippet, provider):
-        title, url, snippet = str(title or "").strip(), str(url or "").strip(), str(snippet or "").strip()
+        title = str(title or "").strip()
+        url = str(url or "").strip()
+        snippet = str(snippet or "").strip()
         try:
             parsed = urlparse(url)
             host = (parsed.hostname or "").lower()
@@ -495,46 +504,70 @@ def _general_web_search(query, max_results=5):
                 return
         except ValueError:
             return
-        if not title or not url or url in seen:
+        if not title or url in seen:
             return
-        candidate = {"type": "web", "title": title[:180], "url": url, "snippet": (provider + " search excerpt (not full webpage): " + snippet)[:850]}
-        if _result_matches_subject(candidate, query):
-            seen.add(url)
-            results.append(candidate)
+        candidate = {"type": "web", "title": title[:180], "url": url,
+                     "snippet": (provider + " search excerpt (not full webpage): " + snippet)[:850]}
+        if wants_profile and (wants_linkedin or wants_facebook):
+            # A Wikipedia page about LinkedIn is not someone's LinkedIn profile.
+            is_linkedin = host == "linkedin.com" or host.endswith(".linkedin.com")
+            is_facebook = host == "facebook.com" or host.endswith(".facebook.com")
+            if not ((wants_linkedin and is_linkedin) or (wants_facebook and is_facebook)):
+                return
+            text = re.sub(r"[^a-z0-9]+", " ", unquote(title + " " + url + " " + snippet).lower())
+            if name_tokens and not all(re.search(r"\b" + re.escape(t) + r"\b", text) for t in name_tokens):
+                return
+            # Search results are candidates, not verified ownership of an account.
+        elif not _result_matches_subject(candidate, query):
+            return
+        seen.add(url)
+        results.append(candidate)
+
+    queries = [query]
+    if wants_profile and wants_linkedin and name_tokens:
+        queries.insert(0, " ".join(name_tokens) + " site:linkedin.com/in/")
+    elif wants_profile and wants_facebook and name_tokens:
+        queries.insert(0, " ".join(name_tokens) + " site:facebook.com")
 
     try:
         from ddgs import DDGS
-        for backend in ("google", "bing", "duckduckgo"):
-            try:
-                raw = DDGS(timeout=9).text(query, region="us-en", max_results=12, backend=backend)
-                for item in raw or []:
-                    if isinstance(item, dict):
-                        add_result(item.get("title"), item.get("href"), item.get("body"), backend)
+        # These are supported by the installed ddgs version reported by Render.
+        for search_query in queries:
+            for backend in ("brave", "startpage", "yahoo", "mojeek", "duckduckgo"):
+                try:
+                    raw = DDGS(timeout=7).text(search_query, region="us-en", max_results=12, backend=backend)
+                    before = len(results)
+                    for item in raw or []:
+                        if isinstance(item, dict):
+                            add_result(item.get("title"), item.get("href"), item.get("body"), backend)
+                        if len(results) >= max_results:
+                            break
+                    logging.warning("[SEARCH] backend=%s accepted=%s query=%r", backend, len(results)-before, search_query)
                     if len(results) >= max_results:
-                        break
-                logging.info("[SEARCH] %s results=%s query=%r", backend, len(results), query)
-                if len(results) >= max_results:
-                    return results[:max_results]
-            except Exception as exc:
-                logging.warning("[SEARCH] %s failed: %s", backend, str(exc)[:150])
+                        return results[:max_results]
+                except Exception as exc:
+                    logging.warning("[SEARCH] backend=%s failed: %s", backend, str(exc)[:150])
     except ImportError:
         logging.warning("[SEARCH] ddgs package not installed")
 
-    if len(results) < max_results:
+    for search_query in queries:
+        if len(results) >= max_results:
+            break
         try:
-            url = "https://www.bing.com/search?" + urlencode({"q": query, "format": "rss"})
+            url = "https://www.bing.com/search?" + urlencode({"q": search_query, "format": "rss"})
             req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/rss+xml, application/xml, text/xml"})
             with urlopen(req, timeout=9) as response:
                 root = ET.fromstring(response.read(400000))
+            before = len(results)
             for item in root.findall(".//item"):
                 add_result(item.findtext("title"), item.findtext("link"), item.findtext("description"), "Bing RSS")
                 if len(results) >= max_results:
                     break
+            logging.warning("[SEARCH] Bing RSS accepted=%s query=%r", len(results)-before, search_query)
         except Exception as exc:
             logging.warning("[SEARCH] Bing RSS failed: %s", str(exc)[:150])
+    logging.warning("[SEARCH] final_results=%s query=%r", len(results), query)
     return results[:max_results]
-
-
 
 
 def _rank_growthlab_news(results, question):
