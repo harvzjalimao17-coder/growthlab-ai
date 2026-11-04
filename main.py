@@ -603,6 +603,112 @@ def _growthlab_person_evidence(name, sources):
     return matches[:8]
 
 
+
+
+def _growthlab_deep_research_subject(question):
+    """Route explicit evidence-comparison person requests, not ordinary searches."""
+    import re
+    q = str(question or '').strip()
+    if not (re.search(r'\b(search|research|find|look up)\b', q, re.I)
+            and re.search(r'\b(compare|evidence|verify|verification|connection|affiliation|connected|related to)\b', q, re.I)):
+        return None
+    m = re.search(r'\b(?:search(?:\s+the\s+(?:live\s+)?web)?(?:\s+for)?|research|find|look up)\s+(?:for\s+)?([A-Za-z][A-Za-z.\'-]*(?:\s+[A-Za-z][A-Za-z.\'-]*){1,3}?)\s*(?=[.,;!?]|\s+(?:on|and|to|with|in|across|separately|compare)\b|$)', q, re.I)
+    if not m:
+        return None
+    name = m.group(1).strip(' .,;!?')
+    return name if 2 <= len(name.split()) <= 4 else None
+
+
+def _growthlab_deep_person_research(name, question):
+    """Independent targeted live searches and bounded page extraction.
+
+    No persistent research store; snippets and extracted content are not
+    identity verification. Failure is reported, never disguised as absence.
+    """
+    import re
+    import requests
+    from urllib.parse import urlsplit
+    key = os.getenv('TAVILY_API_KEY', '').strip()
+    if not key:
+        return ('Deeper live research is unavailable because Tavily is not configured.', [])
+    q = str(question or '')
+    # Extract a user-provided organization or topic only; do not inject a
+    # presumed employer or profile from prior conversations.
+    org = re.search(r'\b(GrowthLab(?:\s+Systems)?|[A-Za-z]+\s+(?:Systems|Automation))\b', q, re.I)
+    topic = org.group(1) if org else ('AI automation' if re.search(r'\bAI|automation\b', q, re.I) else '')
+    searches = [f'"{name}" site:linkedin.com/in/',
+                f'"{name}" {topic}'.strip(),
+                f'"{name}" site:linkedin.com/posts/ {topic}'.strip()]
+    found, seen = [], set()
+    success = 0
+    for query in dict.fromkeys(searches):
+        try:
+            r = requests.post('https://api.tavily.com/search', json={
+                'api_key': key, 'query': query, 'search_depth': 'basic',
+                'max_results': 10, 'include_answer': False,
+                'include_raw_content': False, 'include_images': False,
+            }, timeout=13)
+            r.raise_for_status()
+            success += 1
+            for item in r.json().get('results', []):
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get('url') or '')
+                if url and url not in seen and _growthlab_safe_public_url(url):
+                    seen.add(url)
+                    found.append({'url': url, 'title': str(item.get('title') or ''),
+                                  'snippet': str(item.get('content') or ''), 'provider': 'Tavily'})
+        except Exception as exc:
+            logging.warning('[DEEP RESEARCH] Search failed: %s', type(exc).__name__)
+    if not success:
+        return ('Live research searches failed. No conclusion about public evidence can be drawn.', [])
+    matches = _growthlab_person_evidence(name, found)
+    # Page extraction is attempted for the most relevant direct profiles and
+    # company-related results; inaccessible pages stay snippet-only.
+    extraction = {}
+    candidates = [entry for entry in matches if entry[0] <= 1][:3]
+    if candidates:
+        try:
+            r = requests.post('https://api.tavily.com/extract', json={
+                'api_key': key, 'urls': [entry[4] for entry in candidates],
+                'extract_depth': 'basic', 'format': 'text',
+            }, timeout=20)
+            r.raise_for_status()
+            for item in r.json().get('results', []):
+                if isinstance(item, dict) and item.get('url') and item.get('raw_content'):
+                    extraction[item['url']] = str(item['raw_content'])[:12000]
+        except Exception as exc:
+            logging.warning('[DEEP RESEARCH] Extract failed: %s', type(exc).__name__)
+    if not matches:
+        return (f'No sufficiently relevant exact-name results for **{name}** were retrieved in these live searches. This is not proof that none exist.', [])
+    lines = [f'### Live evidence review: {name}', '',
+             f'Searched the exact name, LinkedIn profiles, and the topic **{topic or "general public information"}**. Results are unverified until independently corroborated.', '']
+    for _, platform, label, title, url, item in matches:
+        body = extraction.get(url, '')
+        snippet = str(item.get('snippet') or '')
+        # Attribute evidence to the inspected content only when the exact name
+        # and the requested topic appear in the same extracted page.
+        source_text = body if body else (title + ' ' + snippet)
+        topic_hit = bool(topic and re.search(re.escape(topic), source_text, re.I))
+        if not topic_hit and re.search(r'\bAI automation\b', topic, re.I):
+            topic_hit = bool(re.search(r'\b(?:AI|automation|workflow)\b', source_text, re.I))
+        basis = 'extracted page text' if body else 'search snippet only (page not verified)'
+        status = ('Topic mentioned; affiliation and identity unverified' if topic_hit
+                  else 'No topic connection established in available text')
+        excerpt = re.sub(r'\s+', ' ', source_text).strip()
+        if topic_hit:
+            hit = re.search(re.escape(topic), excerpt, re.I) if topic else None
+            if not hit and re.search(r'\bAI automation\b', topic, re.I):
+                hit = re.search(r'\b(?:AI|automation|workflow)\b', excerpt, re.I)
+            if hit:
+                excerpt = excerpt[max(0, hit.start()-100):hit.end()+180]
+        lines.extend([f'- **{platform} — {title[:130] or url}**',
+                      f'  - URL: {url}',
+                      f'  - Evidence: {status} ({basis})',
+                      f'  - Available text: {excerpt[:300] or "No readable text"}', ''])
+    lines.append('**Limitations:** Search matches are not identity confirmation. An inaccessible page or missing keyword is not evidence that a connection does not exist. No retrieved profiles or page text were saved to a research database.')
+    return '\n'.join(lines), [entry[-1] for entry in matches]
+
 def _growthlab_multi_person_search(names):
     """Search each person independently and return only matched sources."""
     answers, combined = [], []
@@ -1798,15 +1904,19 @@ def ask(request: AskRequest, http_request: Request):
                 context = None
                 sources = []
 
-        multi_names = _growthlab_multi_person_names(question)
-        person_name, research_query = (None, question) if multi_names else _growthlab_person_research_query(question, history)
-        if person_name or multi_names:
+        deep_name = _growthlab_deep_research_subject(question)
+        multi_names = [] if deep_name else _growthlab_multi_person_names(question)
+        person_name, research_query = (None, question) if (multi_names or deep_name) else _growthlab_person_research_query(question, history)
+        if person_name or multi_names or deep_name:
             business = False
-        web_attempted = bool(person_name or multi_names) or needs_web_search(question, business)
+        web_attempted = bool(person_name or multi_names or deep_name) or needs_web_search(question, business)
 
         web_sources = []
 
-        if multi_names:
+        if deep_name:
+            answer, web_sources = _growthlab_deep_person_research(deep_name, question)
+            save_history(session_id, question, answer)
+        elif multi_names:
             answer, web_sources = _growthlab_multi_person_search(multi_names)
             save_history(session_id, question, answer)
         elif web_attempted:
@@ -1819,8 +1929,8 @@ def ask(request: AskRequest, http_request: Request):
 
                 print(f"Web search unavailable: {type(exc).__name__}: {exc}")
 
-        if multi_names:
-            pass  # Already answered using independent, grounded searches.
+        if deep_name or multi_names:
+            pass  # Already answered using grounded live research.
         elif person_name:
             answer = _growthlab_grounded_person_answer(person_name, web_sources)
             web_sources = [entry[-1] for entry in _growthlab_person_evidence(person_name, web_sources)]
@@ -2082,9 +2192,10 @@ def ask_stream(request: AskRequest, http_request: Request):
 
         history = get_history(session_id)
 
-        multi_names = _growthlab_multi_person_names(question)
-        person_name, research_query = (None, question) if multi_names else _growthlab_person_research_query(question, history)
-        business = (is_business_question(question, history) and not explicit_web_request(question) and not person_name and not multi_names)
+        deep_name = _growthlab_deep_research_subject(question)
+        multi_names = [] if deep_name else _growthlab_multi_person_names(question)
+        person_name, research_query = (None, question) if (multi_names or deep_name) else _growthlab_person_research_query(question, history)
+        business = (is_business_question(question, history) and not explicit_web_request(question) and not person_name and not multi_names and not deep_name)
 
         sources = []
 
@@ -2141,7 +2252,7 @@ def ask_stream(request: AskRequest, http_request: Request):
 
                 yield event("status", message="Reading matching documents..." if sources else "No matching documents found.")
 
-            web_attempted = bool(person_name or multi_names) or needs_web_search(question, business)
+            web_attempted = bool(person_name or multi_names or deep_name) or needs_web_search(question, business)
 
             if not web_attempted and not business:
                 budget_detected = detect_budget_request(question) is not None
@@ -2164,7 +2275,9 @@ def ask_stream(request: AskRequest, http_request: Request):
 
                 yield event("status", message="Searching the web...")
 
-                if multi_names:
+                if deep_name:
+                    deep_answer, web_sources = _growthlab_deep_person_research(deep_name, question)
+                elif multi_names:
                     multi_answer, web_sources = _growthlab_multi_person_search(multi_names)
                 else:
                     try:
@@ -2181,6 +2294,14 @@ def ask_stream(request: AskRequest, http_request: Request):
                 else:
 
                     yield event("status", message=f"Found {len(web_sources)} web sources. Preparing answer...")
+
+            if deep_name:
+                answer = deep_answer
+                yield event("token", text=answer)
+                save_history(session_id, question, answer)
+                yield event("done", answer=answer, sources=web_sources,
+                            session_id=public_session_id, mode="web_search")
+                return
 
             if multi_names:
                 answer = multi_answer
