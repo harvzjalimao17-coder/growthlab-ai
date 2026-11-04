@@ -501,6 +501,64 @@ def _person_search_subject(query):
     return None
 
 
+def _growthlab_person_research_query(question, history=None):
+    """Resolve explicit person research and short name-only research follow-ups."""
+    import re
+    q = str(question or "").strip()
+    prior = [str(x.get("content") or "") for x in (history or []) if x.get("role") == "user"]
+    # "for Jane Doe" continues a previous live person/social search, not a chat guess.
+    follow = re.fullmatch(r"(?:for|about)\s+([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){1,3})[.!?]?", q, re.I)
+    if follow and prior and any(re.search(r"\b(search|research|linkedin|facebook|profile|find)\b", x, re.I) for x in prior[-3:]):
+        name = follow.group(1).strip()
+        return name, f'Search for {name} on LinkedIn and Facebook'
+    name = _person_search_subject(q)
+    if name:
+        return name, q
+    match = re.match(r"^(?:please\s+)?(?:search(?:\s+online)?(?:\s+for)?|research|find)\s+([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){1,3})(?:[.!?]|$)", q, re.I)
+    if match:
+        return match.group(1).strip(), q
+    return None, q
+
+
+def _growthlab_grounded_person_answer(name, sources):
+    """Use retrieved links only; never generate biographical claims from an LLM."""
+    import re
+    from urllib.parse import urlsplit
+    normalized = re.sub(r"\s+", " ", name).strip()
+    exact = re.compile(r"(?<![A-Za-z])" + r"\s+".join(re.escape(w) for w in normalized.split()) + r"(?![A-Za-z])", re.I)
+    matches = []
+    seen = set()
+    for item in sources or []:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        title = str(item.get("title") or "").strip()
+        snippet = str(item.get("snippet") or "").strip()
+        try:
+            parsed = urlsplit(url)
+            if parsed.scheme not in ("https", "http") or not parsed.hostname or parsed.username or parsed.password:
+                continue
+        except Exception:
+            continue
+        # Matching separate first/last names is insufficient (e.g. an obituary).
+        if not exact.search(title + " " + snippet) or url in seen:
+            continue
+        seen.add(url)
+        host = (parsed.hostname or "").lower()
+        kind = ("LinkedIn" if "linkedin.com" in host else "Facebook" if "facebook.com" in host else "Other public result")
+        matches.append((kind, title[:150] or host, url))
+        if len(matches) >= 8:
+            break
+    if not matches:
+        return (f'No search result containing the exact name **{normalized}** was confirmed in this live search. '
+                'This does not prove that no public profile exists. Try adding a location or employer.')
+    lines = [f'Live public search results mentioning **{normalized}**:', '']
+    for kind, title, url in matches:
+        lines.append(f'- **{kind} — {title}**: {url}')
+    lines.extend(['', 'These are retrieved public links, not verified identities. A group post or mention is not proof of an account owner, job title, employer, or biography. No other personal details have been inferred.'])
+    return "\n".join(lines)
+
+
 def _general_web_search(query, max_results=5):
     """Search public web live, checking each requested social platform separately."""
     from urllib.parse import urlparse, urlencode, unquote
@@ -1664,7 +1722,10 @@ def ask(request: AskRequest, http_request: Request):
                 context = None
                 sources = []
 
-        web_attempted = needs_web_search(question, business)
+        person_name, research_query = _growthlab_person_research_query(question, history)
+        if person_name:
+            business = False
+        web_attempted = bool(person_name) or needs_web_search(question, business)
 
         web_sources = []
 
@@ -1672,19 +1733,20 @@ def ask(request: AskRequest, http_request: Request):
 
             try:
 
-                web_sources = search_web(question)
+                web_sources = search_web(research_query if person_name else question)
 
             except Exception as exc:
 
                 print(f"Web search unavailable: {type(exc).__name__}: {exc}")
 
-        answer = generate_ai_answer(
-
-            question, session_id, context=context, business=business,
-
-            web_sources=web_sources, web_attempted=web_attempted
-
-        )
+        if person_name:
+            answer = _growthlab_grounded_person_answer(person_name, web_sources)
+            save_history(session_id, question, answer)
+        else:
+            answer = generate_ai_answer(
+                question, session_id, context=context, business=business,
+                web_sources=web_sources, web_attempted=web_attempted
+            )
 
         if web_attempted:
 
@@ -1937,7 +1999,8 @@ def ask_stream(request: AskRequest, http_request: Request):
 
         history = get_history(session_id)
 
-        business = is_business_question(question, history) and not explicit_web_request(question)
+        person_name, research_query = _growthlab_person_research_query(question, history)
+        business = (is_business_question(question, history) and not explicit_web_request(question) and not person_name)
 
         sources = []
 
@@ -1994,7 +2057,7 @@ def ask_stream(request: AskRequest, http_request: Request):
 
                 yield event("status", message="Reading matching documents..." if sources else "No matching documents found.")
 
-            web_attempted = needs_web_search(question, business)
+            web_attempted = bool(person_name) or needs_web_search(question, business)
 
             if not web_attempted and not business:
                 budget_detected = detect_budget_request(question) is not None
@@ -2019,7 +2082,7 @@ def ask_stream(request: AskRequest, http_request: Request):
 
                 try:
 
-                    web_sources = search_web(question)
+                    web_sources = search_web(research_query if person_name else question)
 
                 except Exception as exc:
 
@@ -2034,6 +2097,14 @@ def ask_stream(request: AskRequest, http_request: Request):
                 else:
 
                     yield event("status", message=f"Found {len(web_sources)} web sources. Preparing answer...")
+
+            if person_name:
+                answer = _growthlab_grounded_person_answer(person_name, web_sources)
+                yield event("token", text=answer)
+                save_history(session_id, question, answer)
+                yield event("done", answer=answer, sources=web_sources,
+                            session_id=public_session_id, mode="web_search")
+                return
 
             yield event("status", message="Generating answer...")
 
