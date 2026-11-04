@@ -509,14 +509,14 @@ def _growthlab_person_research_query(question, history=None):
     # "for Jane Doe" continues a previous live person/social search, not a chat guess.
     follow = re.fullmatch(r"(?:for|about)\s+([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){1,3})[.!?]?", q, re.I)
     if follow and prior and any(re.search(r"\b(search|research|linkedin|facebook|profile|find)\b", x, re.I) for x in prior[-3:]):
-        name = follow.group(1).strip()
+        name = follow.group(1).strip().rstrip(".,!?;:")
         return name, f'Search for {name} on LinkedIn and Facebook'
     name = _person_search_subject(q)
     if name:
         return name, q
     match = re.match(r"^(?:please\s+)?(?:search(?:\s+online)?(?:\s+for)?|research|find)\s+([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){1,3})(?:[.!?]|$)", q, re.I)
     if match:
-        return match.group(1).strip(), q
+        return match.group(1).strip().rstrip(".,!?;:"), q
     return None, q
 
 
@@ -524,7 +524,7 @@ def _growthlab_grounded_person_answer(name, sources):
     """Use retrieved links only; never generate biographical claims from an LLM."""
     import re
     from urllib.parse import urlsplit
-    normalized = re.sub(r"\s+", " ", name).strip()
+    normalized = re.sub(r"\s+", " ", name).strip().strip(".,!?;: ")
     exact = re.compile(r"(?<![A-Za-z])" + r"\s+".join(re.escape(w) for w in normalized.split()) + r"(?![A-Za-z])", re.I)
     matches = []
     seen = set()
@@ -536,24 +536,45 @@ def _growthlab_grounded_person_answer(name, sources):
         snippet = str(item.get("snippet") or "").strip()
         try:
             parsed = urlsplit(url)
-            if parsed.scheme not in ("https", "http") or not parsed.hostname or parsed.username or parsed.password:
+            host = (parsed.hostname or "").lower()
+            if parsed.scheme not in ("https", "http") or not host or parsed.username or parsed.password:
                 continue
         except Exception:
             continue
-        # Matching separate first/last names is insufficient (e.g. an obituary).
-        if not exact.search(title + " " + snippet) or url in seen:
+        # Require the complete name in the title or search excerpt; separate
+        # first/last names in unrelated passages are not evidence of a match.
+        if not (exact.search(title) or exact.search(snippet)):
             continue
-        seen.add(url)
-        host = (parsed.hostname or "").lower()
-        kind = ("LinkedIn" if "linkedin.com" in host else "Facebook" if "facebook.com" in host else "Other public result")
-        matches.append((kind, title[:150] or host, url))
-        if len(matches) >= 8:
-            break
+        # Treat localized LinkedIn hosts and www hosts as the same profile.
+        canonical_host = host
+        if host == "linkedin.com" or host.endswith(".linkedin.com"):
+            canonical_host = "linkedin.com"
+        elif host == "facebook.com" or host.endswith(".facebook.com"):
+            canonical_host = "facebook.com"
+        elif host == "pinterest.com" or host.endswith(".pinterest.com"):
+            canonical_host = "pinterest.com"
+        canonical_path = parsed.path.rstrip("/").lower()
+        key = (canonical_host, canonical_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if canonical_host == "linkedin.com":
+            kind = "LinkedIn"
+            priority = 0 if canonical_path.startswith("/in/") else 2
+        elif canonical_host == "facebook.com":
+            kind = "Facebook"
+            priority = 1 if not canonical_path.startswith("/groups/") else 3
+        else:
+            kind = "Other public result"
+            priority = 4
+        matches.append((priority, kind, title[:150] or host, url))
+    matches.sort(key=lambda entry: entry[0])
+    matches = matches[:8]
     if not matches:
         return (f'No search result containing the exact name **{normalized}** was confirmed in this live search. '
                 'This does not prove that no public profile exists. Try adding a location or employer.')
     lines = [f'Live public search results mentioning **{normalized}**:', '']
-    for kind, title, url in matches:
+    for _, kind, title, url in matches:
         lines.append(f'- **{kind} — {title}**: {url}')
     lines.extend(['', 'These are retrieved public links, not verified identities. A group post or mention is not proof of an account owner, job title, employer, or biography. No other personal details have been inferred.'])
     return "\n".join(lines)
