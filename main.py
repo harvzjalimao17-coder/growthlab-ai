@@ -619,6 +619,57 @@ def _growthlab_deep_research_subject(question):
     return name if 2 <= len(name.split()) <= 4 else None
 
 
+def _growthlab_classify_research_evidence(name, requested_topic, source_text):
+    """Classify claims in a retrieved source, without verifying identity or truth."""
+    import re
+    text = re.sub(r"\s+", " ", str(source_text or "")).strip()
+    topic = str(requested_topic or "").strip()
+    if not text:
+        return ("No readable evidence available", "", "No evidence")
+    org_requested = bool(re.search(r"growthlab", topic, re.I))
+    org = re.search(r"\bGrowth\s*Lab(?:\s+Systems)?\b", text, re.I)
+    automation = re.search(
+        r"\b(?:AI\s+automation|workflow\s+automation|CRM\s+automation|"
+        r"business\s+automation|booking\s+systems?|AI\s+customer\s+support|"
+        r"automation|automated\s+workflows?)\b", text, re.I)
+    affiliation = re.search(
+        r"\b(?:founder|co[- ]?founder|owner|CEO|works?\s+at|"
+        r"employed\s+by|founded|with)\s*(?:@|of|at|for|\s)?\s*"
+        r"Growth\s*Lab(?:\s+Systems)?\b", text, re.I)
+    # The name is already checked in the title/lead excerpt by the search
+    # filter; source text is evidence of a *claim*, never proof of identity.
+    hits = []
+    if affiliation:
+        hits.append(("Claimed GrowthLab affiliation", affiliation))
+    elif org:
+        hits.append(("GrowthLab mentioned", org))
+    if automation:
+        hits.append(("AI/business automation mentioned", automation))
+    if not hits:
+        return ("No relevant topic evidence found in available text", "", "No evidence")
+    # Prioritize the requested organization; do not call unrelated AI mentions
+    # evidence of a GrowthLab affiliation.
+    if org_requested and not org:
+        classification = "Automation-related content only; no GrowthLab connection shown"
+        hit = automation
+    elif affiliation:
+        classification = "Explicit GrowthLab affiliation claim (unverified)"
+        hit = affiliation
+    elif org:
+        classification = "GrowthLab mentioned (affiliation unverified)"
+        hit = org
+    else:
+        classification = "Automation-related content (affiliation unverified)"
+        hit = automation
+    left, right = max(0, hit.start() - 95), min(len(text), hit.end() + 140)
+    quote = text[left:right].strip()
+    if left:
+        quote = "…" + quote
+    if right < len(text):
+        quote += "…"
+    return (classification, quote, "Claim from source, not independent verification")
+
+
 def _growthlab_deep_person_research(name, question):
     """Independent targeted live searches and bounded page extraction.
 
@@ -686,26 +737,23 @@ def _growthlab_deep_person_research(name, question):
     for _, platform, label, title, url, item in matches:
         body = extraction.get(url, '')
         snippet = str(item.get('snippet') or '')
-        # Attribute evidence to the inspected content only when the exact name
-        # and the requested topic appear in the same extracted page.
         source_text = body if body else (title + ' ' + snippet)
-        topic_hit = bool(topic and re.search(re.escape(topic), source_text, re.I))
-        if not topic_hit and re.search(r'\bAI automation\b', topic, re.I):
-            topic_hit = bool(re.search(r'\b(?:AI|automation|workflow)\b', source_text, re.I))
         basis = 'extracted page text' if body else 'search snippet only (page not verified)'
-        status = ('Topic mentioned; affiliation and identity unverified' if topic_hit
-                  else 'No topic connection established in available text')
+        status, supporting_quote, verification = _growthlab_classify_research_evidence(
+            name, topic, source_text)
+        if body and status == 'No relevant topic evidence found in available text':
+            snippet_status, snippet_quote, snippet_verification = _growthlab_classify_research_evidence(
+                name, topic, title + ' ' + snippet)
+            if snippet_status != 'No relevant topic evidence found in available text':
+                status, supporting_quote, verification = snippet_status, snippet_quote, snippet_verification
+                basis = 'search snippet only (extracted page did not establish connection)'
         excerpt = re.sub(r'\s+', ' ', source_text).strip()
-        if topic_hit:
-            hit = re.search(re.escape(topic), excerpt, re.I) if topic else None
-            if not hit and re.search(r'\bAI automation\b', topic, re.I):
-                hit = re.search(r'\b(?:AI|automation|workflow)\b', excerpt, re.I)
-            if hit:
-                excerpt = excerpt[max(0, hit.start()-100):hit.end()+180]
         lines.extend([f'- **{platform} — {title[:130] or url}**',
                       f'  - URL: {url}',
                       f'  - Evidence: {status} ({basis})',
-                      f'  - Available text: {excerpt[:300] or "No readable text"}', ''])
+                      f'  - Supporting text: {supporting_quote or "No relevant phrase found"}',
+                      f'  - Verification: {verification}',
+                      f'  - Available text: {excerpt[:220] or "No readable text"}', ''])
     lines.append('**Limitations:** Search matches are not identity confirmation. An inaccessible page or missing keyword is not evidence that a connection does not exist. No retrieved profiles or page text were saved to a research database.')
     return '\n'.join(lines), [entry[-1] for entry in matches]
 
