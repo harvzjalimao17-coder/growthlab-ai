@@ -156,7 +156,7 @@ from datetime import datetime, timezone
 
 WEB_SEARCH_PATTERNS = (
 
-    r"\b(?:search|look up|google|browse|find online|on the web|on the internet|find (?:this )?person|linkedin|public profile)\b",
+    r"\b(?:search|research|look up|google|browse|find online|on the web|on the internet|find (?:this )?person|linkedin|public profile)\b",
 
     r"\b(?:latest|recent|today|tonight|yesterday|tomorrow|this week|this month|currently|right now|up.to.date|breaking news)\b",
 
@@ -475,6 +475,22 @@ def _clean_live_search_query(query):
 
 
 
+def _person_search_subject(query):
+    """Extract a likely named person without treating requested output fields as a name."""
+    text = str(query or "").strip()
+    text = re.sub(r"^(?:please\s+)?(?:find|search(?:\s+for)?|look\s+up|research|identify)\s+", "", text, flags=re.I)
+    # The first comma or profile/role request ends the subject, not the person's name.
+    text = re.split(
+        r",|\s+\b(?:who\s+is|(?:the\s+)?(?:ceo|founder|chairman|president|director|executive|owner)\s+of|"
+        r"(?:official\s+)?(?:linkedin|facebook|profile|current\s+position|company|sources?|links?)\b)",
+        text, maxsplit=1, flags=re.I,
+    )[0]
+    words = re.findall(r"[A-Za-z][A-Za-z.'-]*", text)
+    if 2 <= len(words) <= 4 and all(len(word) > 1 and word[0].isupper() for word in words):
+        return " ".join(words)
+    return None
+
+
 def _general_web_search(query, max_results=5):
     """Search supported DDGS engines and RSS; reject unrelated profile results."""
     from urllib.parse import urlparse, urlencode, unquote
@@ -485,10 +501,12 @@ def _general_web_search(query, max_results=5):
     query = _clean_live_search_query(query)
     wants_linkedin = bool(re.search(r"\blinkedin\b", query, re.I))
     wants_facebook = bool(re.search(r"\bfacebook\b", query, re.I))
-    wants_profile = bool(re.search(r"\b(profile|account)\b", query, re.I))
-    # Keep the person's name as the essential search target.
-    name_tokens = [t for t in _search_subject_tokens(query)
-                   if t not in {"linkedin", "facebook", "profile", "account", "profiles", "accounts"}]
+    person_name = _person_search_subject(query)
+    wants_profile = bool(re.search(r"\b(profile|account)\b", query, re.I)) or bool(person_name and (wants_linkedin or wants_facebook))
+    # For person research, match the person's name, not requested answer fields.
+    name_tokens = ([w.lower() for w in person_name.split()] if person_name else
+                   [t for t in _search_subject_tokens(query)
+                    if t not in {"linkedin", "facebook", "profile", "account", "profiles", "accounts"}])
     name_tokens = list(dict.fromkeys(name_tokens))
 
     def add_result(title, url, snippet, provider):
@@ -508,7 +526,7 @@ def _general_web_search(query, max_results=5):
             return
         candidate = {"type": "web", "title": title[:180], "url": url,
                      "snippet": (provider + " search excerpt (not full webpage): " + snippet)[:850]}
-        if wants_profile and (wants_linkedin or wants_facebook):
+        if wants_profile and (wants_linkedin or wants_facebook) and not person_name:
             # A Wikipedia page about LinkedIn is not someone's LinkedIn profile.
             is_linkedin = host == "linkedin.com" or host.endswith(".linkedin.com")
             is_facebook = host == "facebook.com" or host.endswith(".facebook.com")
@@ -518,13 +536,24 @@ def _general_web_search(query, max_results=5):
             if name_tokens and not all(re.search(r"\b" + re.escape(t) + r"\b", text) for t in name_tokens):
                 return
             # Search results are candidates, not verified ownership of an account.
+        elif person_name:
+            # Company biographies and professional pages need the person's name,
+            # not every instruction in the user's full question.
+            text = re.sub(r"[^a-z0-9]+", " ", unquote(title + " " + url + " " + snippet).lower())
+            if not all(re.search(r"\b" + re.escape(t) + r"\b", text) for t in name_tokens):
+                return
         elif not _result_matches_subject(candidate, query):
             return
         seen.add(url)
         results.append(candidate)
 
     queries = [query]
-    if wants_profile and wants_linkedin and name_tokens:
+    if person_name:
+        # Search the profile and a separate independent biography/source.
+        queries = [person_name + " site:linkedin.com/in/", person_name + " official biography", query] if wants_linkedin else [person_name + " official biography", query]
+        if wants_facebook and not wants_linkedin:
+            queries.insert(0, person_name + " site:facebook.com")
+    elif wants_profile and wants_linkedin and name_tokens:
         queries.insert(0, " ".join(name_tokens) + " site:linkedin.com/in/")
     elif wants_profile and wants_facebook and name_tokens:
         queries.insert(0, " ".join(name_tokens) + " site:facebook.com")
