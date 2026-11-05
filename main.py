@@ -1132,6 +1132,52 @@ def _rank_growthlab_news(results, question):
         item for score, item in ranked[:requested_count]
     ]
 
+def _growthlab_bible_reference(question):
+    """Recognize explicit scripture citations, not arbitrary religious questions."""
+    books = ("Genesis|Exodus|Leviticus|Numbers|Deuteronomy|Joshua|Judges|Ruth|"
+             "(?:1|2)\\s*Samuel|(?:1|2)\\s*Kings|(?:1|2)\\s*Chronicles|Ezra|Nehemiah|Esther|"
+             "Job|Psalms?|Proverbs|Ecclesiastes|Song of Solomon|Isaiah|Jeremiah|Lamentations|"
+             "Ezekiel|Daniel|Hosea|Joel|Amos|Obadiah|Jonah|Micah|Nahum|Habakkuk|Zephaniah|"
+             "Haggai|Zechariah|Malachi|Matthew|Mark|Luke|John|Acts|Romans|"
+             "(?:1|2)\\s*Corinthians|Galatians|Ephesians|Philippians|Colossians|"
+             "(?:1|2)\\s*Thessalonians|(?:1|2)\\s*Timothy|Titus|Philemon|Hebrews|James|"
+             "(?:1|2)\\s*Peter|(?:1|2|3)\\s*John|Jude|Revelation")
+    match = re.search(r"\b(" + books + r")\s+(\d{1,3})(?::(\d{1,3})(?:\s*[-–]\s*(\d{1,3}))?)?\b", question, re.I)
+    if not match:
+        return None
+    book, chapter, verse, end = match.group(1), match.group(2), match.group(3), match.group(4)
+    return f"{book} {chapter}" + (f":{verse}" if verse else "") + (f"-{end}" if end else "")
+
+
+def _growthlab_live_knowledge(question):
+    """Fetch live encyclopedia or public-domain scripture, never persist retrieved text."""
+    import requests
+    from urllib.parse import quote
+    reference = _growthlab_bible_reference(question)
+    if reference:
+        try:
+            response = requests.get("https://bible-api.com/" + quote(reference, safe=""),
+                                    params={"translation": "kjv"}, timeout=12,
+                                    headers={"User-Agent": "GrowthLabAI/1.0 (knowledge lookup)"})
+            response.raise_for_status()
+            data = response.json()
+            verses = data.get("verses") or []
+            if verses:
+                content = " ".join(f"{v.get('book_name', '')} {v.get('chapter', '')}:{v.get('verse', '')} {v.get('text', '').strip()}" for v in verses[:80])
+                return [{"type": "web", "title": reference + " (King James Version)",
+                         "url": "https://bible-api.com/" + quote(reference, safe=""),
+                         "snippet": content[:9000]}]
+        except Exception as exc:
+            print("[KNOWLEDGE] Bible lookup unavailable:", type(exc).__name__)
+        return []
+    if _wiki_question(question) and not _news_question(question):
+        try:
+            return _wikipedia_search(_clean_live_search_query(question), max_results=5)
+        except Exception as exc:
+            print("[KNOWLEDGE] Wikipedia lookup unavailable:", type(exc).__name__)
+    return []
+
+
 def search_web(question):
     """Combine relevant news and general search results."""
 
@@ -1987,7 +2033,7 @@ def ask(request: AskRequest, http_request: Request):
         person_name, research_query = (None, question) if (multi_names or deep_name) else _growthlab_person_research_query(question, history)
         if person_name or multi_names or deep_name:
             business = False
-        web_attempted = bool(person_name or multi_names or deep_name) or needs_web_search(question, business)
+        web_attempted = bool(person_name or multi_names or deep_name) or needs_web_search(question, business) or (not business and bool(_growthlab_bible_reference(question))) or (not business and _wiki_question(question))
 
         web_sources = []
 
@@ -2001,7 +2047,7 @@ def ask(request: AskRequest, http_request: Request):
 
             try:
 
-                web_sources = search_web(research_query if person_name else question)
+                web_sources = search_web(research_query if person_name else question) if person_name else (_growthlab_live_knowledge(question) or search_web(question))
 
             except Exception as exc:
 
@@ -2330,7 +2376,7 @@ def ask_stream(request: AskRequest, http_request: Request):
 
                 yield event("status", message="Reading matching documents..." if sources else "No matching documents found.")
 
-            web_attempted = bool(person_name or multi_names or deep_name) or needs_web_search(question, business)
+            web_attempted = bool(person_name or multi_names or deep_name) or needs_web_search(question, business) or (not business and bool(_growthlab_bible_reference(question))) or (not business and _wiki_question(question))
 
             if not web_attempted and not business:
                 budget_detected = detect_budget_request(question) is not None
@@ -2359,7 +2405,7 @@ def ask_stream(request: AskRequest, http_request: Request):
                     multi_answer, web_sources = _growthlab_multi_person_search(multi_names)
                 else:
                     try:
-                        web_sources = search_web(research_query if person_name else question)
+                        web_sources = search_web(research_query if person_name else question) if person_name else (_growthlab_live_knowledge(question) or search_web(question))
                     except Exception as exc:
                         print(f"Web search unavailable: {type(exc).__name__}: {exc}")
 
