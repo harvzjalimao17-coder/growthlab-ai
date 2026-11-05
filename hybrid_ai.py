@@ -1,7 +1,7 @@
-"""GrowthLab AI adapter for local Ollama or Google's Gemini Interactions API.
+"""GrowthLab AI: Ollama-compatible adapter for Google's native Gemini API.
 
-Preserves the Ollama-compatible chat() response shape expected by main.py.
-Uses the documented v1 Interactions endpoint, without an extra SDK dependency.
+Uses generateContent / streamGenerateContent, not the experimental Interactions API.
+No additional SDK dependency. Never logs API keys or prompt contents.
 """
 import json
 import logging
@@ -11,18 +11,19 @@ import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from types import SimpleNamespace
+from urllib.parse import quote
 
 import requests
 
 
 class GeminiRateLimitError(RuntimeError):
-    """Gemini rate limit or an active provider cooldown."""
+    """Gemini is rate-limited or in a provider cooldown."""
 
 
 class HybridAIClient:
     _lock = threading.Lock()
     _cooldown_until = 0.0
-    _endpoint = "https://generativelanguage.googleapis.com/v1/interactions"
+    _base_url = "https://generativelanguage.googleapis.com/v1beta/models"
     _transient_statuses = {500, 502, 503, 504}
 
     def __init__(self, local_client):
@@ -46,105 +47,96 @@ class HybridAIClient:
         return max(2.0, min(300.0, seconds if seconds is not None else 30.0))
 
     @staticmethod
-    def _input_and_system(messages):
-        """Keep main.py's message history without relying on server-side storage.
-
-        System messages remain system instructions; conversational turns are
-        clearly labeled inside a single input string for stateless operation.
-        """
-        system_parts = []
-        turns = []
-        for message in messages or []:
-            if not isinstance(message, dict):
-                continue
-            role = str(message.get("role") or "user").lower()
-            content = message.get("content") or ""
-            if isinstance(content, list):
-                content = "\n".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content)
-            content = str(content).strip()
-            if not content:
-                continue
-            if role == "system":
-                system_parts.append(content)
-            elif role in ("user", "assistant"):
-                turns.append((role, content))
-        if not turns:
-            raise ValueError("Gemini requires at least one user or assistant message")
-        if len(turns) == 1 and turns[0][0] == "user":
-            prompt = turns[0][1]
-        else:
-            prompt = "Conversation history (chronological):\n" + "\n\n".join(
-                f"{role.upper()}:\n{content}" for role, content in turns
-            ) + "\n\nRespond to the latest USER message, using earlier turns only as context."
-        return prompt, "\n\n".join(system_parts)
-
-    @staticmethod
     def _error_detail(response):
         try:
             error = response.json().get("error", {})
             if isinstance(error, dict):
-                return str(error.get("message") or error.get("status") or "No structured provider error returned")[:240]
+                return str(error.get("message") or error.get("status") or "Provider did not include an error message")[:240]
         except (ValueError, AttributeError, TypeError):
             pass
-        return "No structured provider error returned"
+        return "Provider did not include an error message"
 
     @staticmethod
-    def _output_text(data):
-        # Interactions responses use steps[].content[].text, not choices[].
-        parts = []
-        for step in data.get("steps", []) or []:
-            if not isinstance(step, dict) or step.get("type") != "model_output":
+    def _request_payload(messages, options):
+        system_parts, contents = [], []
+        for message in messages or []:
+            if not isinstance(message, dict):
                 continue
-            for content in step.get("content", []) or []:
-                if isinstance(content, dict) and content.get("type") == "text":
-                    parts.append(str(content.get("text") or ""))
-        return "".join(parts)
+            role = str(message.get("role") or "user").lower()
+            value = message.get("content") or ""
+            if isinstance(value, list):
+                value = "\n".join(str(p.get("text", "")) if isinstance(p, dict) else str(p) for p in value)
+            value = str(value).strip()
+            if not value:
+                continue
+            if role == "system":
+                system_parts.append(value)
+            elif role in ("user", "assistant"):
+                gemini_role = "model" if role == "assistant" else "user"
+                if contents and contents[-1]["role"] == gemini_role:
+                    contents[-1]["parts"].append({"text": value})
+                else:
+                    contents.append({"role": gemini_role, "parts": [{"text": value}]})
+        if not contents:
+            raise ValueError("Gemini requires at least one conversational message")
+        payload = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": options.get("temperature", 0.2),
+                "maxOutputTokens": options.get("num_predict", 1200),
+            },
+        }
+        if system_parts:
+            payload["systemInstruction"] = {"parts": [{"text": "\n\n".join(system_parts)}]}
+        return payload
+
+    @staticmethod
+    def _extract_text(data):
+        if not isinstance(data, dict):
+            return ""
+        chunks = []
+        for candidate in data.get("candidates", []) or []:
+            if not isinstance(candidate, dict):
+                continue
+            content = candidate.get("content") or {}
+            for part in content.get("parts", []) or []:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    chunks.append(part["text"])
+            if chunks:
+                break
+        return "".join(chunks)
 
     def chat(self, model=None, messages=None, options=None, stream=False, **kwargs):
         if os.getenv("GROWTHLAB_CLOUD_MODE", "").lower() != "true":
-            return self.local_client.chat(
-                model=model, messages=messages, options=options,
-                stream=stream, **kwargs
-            )
-
+            return self.local_client.chat(model=model, messages=messages, options=options,
+                                          stream=stream, **kwargs)
         api_key = os.getenv("GEMINI_API_KEY", "").strip()
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY is missing from the environment")
         with self._lock:
             remaining = self.__class__._cooldown_until - time.monotonic()
         if remaining > 0:
-            raise GeminiRateLimitError(
-                f"Gemini is rate-limited; retry in approximately {max(1, remaining):.0f} seconds."
-            )
+            raise GeminiRateLimitError(f"Gemini rate limit cooldown: retry in approximately {remaining:.0f} seconds")
 
-        options = options or {}
-        selected_model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip() or "gemini-3.8-flash"
-        prompt, system_instruction = self._input_and_system(messages)
-        payload = {
-            "model": selected_model,
-            "input": prompt,
-            "stream": bool(stream),
-            "store": False,
-            "generation_config": {
-                "temperature": options.get("temperature", 0.2),
-                "max_output_tokens": options.get("num_predict", 1200),
-            },
-        }
-        if system_instruction:
-            payload["system_instruction"] = system_instruction
-
+        selected_model = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+        selected_model = selected_model.removeprefix("models/")
+        if not selected_model or "/" in selected_model:
+            raise ValueError("GEMINI_MODEL must be a Gemini model identifier")
+        method = "streamGenerateContent?alt=sse" if stream else "generateContent"
+        url = f"{self._base_url}/{quote(selected_model, safe='')}:{method}"
+        payload = self._request_payload(messages, options or {})
         response = None
         for attempt in range(1, 4):
             try:
                 response = requests.post(
-                    self._endpoint,
-                    headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+                    url, headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
                     json=payload, stream=bool(stream), timeout=(15, 120),
                 )
             except requests.RequestException as exc:
+                logging.warning("Gemini network failure: model=%s attempt=%s/3 type=%s",
+                                selected_model, attempt, type(exc).__name__)
                 if attempt == 3:
                     raise RuntimeError("Gemini network request failed after 3 attempts") from exc
-                logging.warning("Gemini connection error: model=%s attempt=%s/3", selected_model, attempt)
                 time.sleep(attempt)
                 continue
             status = response.status_code
@@ -152,11 +144,10 @@ class HybridAIClient:
                 seconds = self._retry_seconds(response)
                 with self._lock:
                     self.__class__._cooldown_until = max(
-                        self.__class__._cooldown_until, time.monotonic() + seconds
-                    )
+                        self.__class__._cooldown_until, time.monotonic() + seconds)
                 response.close()
                 logging.warning("Gemini HTTP 429: model=%s cooldown=%.1fs", selected_model, seconds)
-                raise GeminiRateLimitError(f"Gemini rate limit reached; retry after approximately {seconds:.0f} seconds.")
+                raise GeminiRateLimitError(f"Gemini rate limit reached; retry after approximately {seconds:.0f} seconds")
             if status in self._transient_statuses:
                 detail = self._error_detail(response)
                 response.close()
@@ -165,30 +156,28 @@ class HybridAIClient:
                 if attempt < 3:
                     time.sleep(attempt * 2)
                     continue
-                raise RuntimeError(f"Gemini Interactions API failed (HTTP {status}) after 3 attempts")
+                raise RuntimeError(f"Gemini API unavailable (HTTP {status}) after 3 attempts")
             if status >= 400:
                 detail = self._error_detail(response)
                 response.close()
-                logging.error("Gemini Interactions API HTTP %s: model=%s detail=%s", status, selected_model, detail)
-                raise RuntimeError(f"Gemini Interactions API failed (HTTP {status}): {detail}")
+                logging.error("Gemini API HTTP %s: model=%s detail=%s", status, selected_model, detail)
+                raise RuntimeError(f"Gemini API failed (HTTP {status}): {detail}")
             break
 
         if not stream:
             try:
                 data = response.json()
-                if data.get("status") == "failed":
-                    raise RuntimeError("Gemini interaction reported failure")
-                content = self._output_text(data)
+                content = self._extract_text(data)
                 if not content:
-                    raise RuntimeError("Gemini interaction returned no text")
+                    reason = ((data.get("candidates") or [{}])[0].get("finishReason") or "no text")
+                    raise RuntimeError(f"Gemini returned no text (finish reason: {reason})")
                 return SimpleNamespace(message=SimpleNamespace(content=content))
             finally:
                 response.close()
 
         def generate():
+            emitted = False
             try:
-                # Interactions streams SSE with event_type='step.delta',
-                # delta.type='text', delta.text='<chunk>'.
                 for line in response.iter_lines():
                     if not line:
                         continue
@@ -200,20 +189,22 @@ class HybridAIClient:
                     if not raw or raw == "[DONE]":
                         continue
                     try:
-                        event = json.loads(raw)
+                        data = json.loads(raw)
                     except json.JSONDecodeError:
+                        logging.warning("Gemini stream contained malformed JSON event")
                         continue
-                    if event.get("event_type") == "interaction.status_update" and event.get("status") == "failed":
-                        raise RuntimeError("Gemini streaming interaction failed")
-                    if event.get("error"):
-                        raise RuntimeError("Gemini streaming interaction returned an error")
-                    if event.get("event_type") == "step.delta":
-                        delta = event.get("delta") or {}
-                        if delta.get("type") == "text" and delta.get("text"):
-                            yield SimpleNamespace(message=SimpleNamespace(content=delta["text"]))
+                    if "error" in data:
+                        err = data["error"]
+                        detail = str(err.get("message", "stream error"))[:200] if isinstance(err, dict) else "stream error"
+                        raise RuntimeError(f"Gemini stream failed: {detail}")
+                    text = self._extract_text(data)
+                    if text:
+                        emitted = True
+                        yield SimpleNamespace(message=SimpleNamespace(content=text))
+                if not emitted:
+                    raise RuntimeError("Gemini stream finished without generating text")
             finally:
                 response.close()
-
         return generate()
 
     def list(self):
