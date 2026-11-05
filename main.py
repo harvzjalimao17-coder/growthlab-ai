@@ -1178,8 +1178,54 @@ def _growthlab_live_knowledge(question):
     return []
 
 
+def _growthlab_exact_company_search(question):
+    """Live lookup of the exact GrowthLab Systems domain, never other GrowthLab brands.
+
+    Search results are ephemeral and must be tied to the official domain or
+    explicitly mention that domain. No founder identity is assumed.
+    """
+    from urllib.parse import urlsplit
+
+    official = "growthlabsystems.com"
+    candidates = []
+    try:
+        # A live site read is stronger than a similarly named search hit.
+        page = _growthlab_read_webpage("https://" + official + "/", max_chars=4000)
+        if page and re.search(r"growth\s*lab|growthlab", page.get("text", ""), re.I):
+            candidates.append({
+                "type": "web", "title": "GrowthLab Systems — official website",
+                "url": "https://" + official + "/",
+                "snippet": "Official website text (live retrieval): " + page["text"][:1600],
+            })
+    except Exception as exc:
+        logging.warning("[EXACT COMPANY] Official website unavailable: %s", type(exc).__name__)
+
+    try:
+        found = _general_web_search('"growthlabsystems.com" founder owner about', max_results=8)
+    except Exception as exc:
+        logging.warning("[EXACT COMPANY] Live search unavailable: %s", type(exc).__name__)
+        found = []
+
+    seen = {item["url"].rstrip("/") for item in candidates}
+    for item in found:
+        url = str(item.get("url") or "")
+        host = (urlsplit(url).hostname or "").lower().removeprefix("www.")
+        text = (str(item.get("title") or "") + " " + str(item.get("snippet") or "")).lower()
+        # An unrelated GrowthLab company is never evidence for this company.
+        if not (host == official or host.endswith("." + official) or official in text):
+            continue
+        if url.rstrip("/") not in seen:
+            candidates.append(item)
+            seen.add(url.rstrip("/"))
+        if len(candidates) >= 5:
+            break
+    return candidates
+
+
 def _growthlab_web_first(question):
     """Live public search before private document retrieval; no persistent storage."""
+    if re.search(r"\bgrowth\s*lab\s+systems\b|\bgrowthlabsystems\.com\b", str(question), re.I):
+        return _growthlab_exact_company_search(question)
     try:
         knowledge = _growthlab_live_knowledge(question)
         if knowledge:
@@ -1196,6 +1242,11 @@ def _growthlab_web_first(question):
 def _growthlab_web_fallback(question, sources):
     """Return sourced search results if the model times out; never invent a summary."""
     if not sources:
+        if re.search(r"\bgrowth\s*lab\s+systems\b|\bgrowthlabsystems\.com\b", str(question), re.I):
+            return ("I couldn't verify that information about GrowthLab Systems "
+                    "from its official website or other sources explicitly tied to "
+                    "growthlabsystems.com. I won't substitute details from a "
+                    "different company with a similar name.")
         return ("Live web information could not be verified, and the AI model "
                 "could not complete its response. Please retry shortly.")
     lines = ["The live web search returned these sources, but AI summarization "
@@ -1614,6 +1665,13 @@ def web_system_message(sources, attempted, question=""):
         return {"role": "system", "content": web_context(sources, question)}
 
     if attempted:
+
+        if re.search(r"\bgrowth\s*lab\s+systems\b|\bgrowthlabsystems\.com\b", str(question), re.I):
+            return {"role": "system", "content": (
+                "No reliable live sources tied to growthlabsystems.com were retrieved. "
+                "Do not name a founder, owner, CEO, or employee based on a different "
+                "GrowthLab brand. Say the requested fact could not be verified."
+            )}
 
         return {"role": "system", "content": (
 
