@@ -1222,6 +1222,22 @@ def _growthlab_exact_company_search(question):
     return candidates
 
 
+def _growthlab_conversational_request(question):
+    """Skip live research for plain greetings and assistant self-introductions."""
+    q = re.sub(r"\s+", " ", str(question or "").strip().lower()).strip(" .!?，")
+    if explicit_web_request(q):
+        return False
+    return bool(re.fullmatch(
+        r"(?:hi|hello|hey|good morning|good afternoon|good evening|"
+        r"hello there|hi there|hey there|"
+        r"(?:hi|hello|hey)[, ]+(?:growthlab ai|assistant)|"
+        r"(?:hello|hi|hey)[, ]+(?:can you |could you |please )?"
+        r"(?:introduce yourself|tell me about yourself|who are you)|"
+        r"(?:can you |could you |please )?(?:introduce yourself|tell me about yourself|who are you)|"
+        r"what is your name|what can you do)", q, re.I
+    ))
+
+
 def _growthlab_web_first(question):
     """Live public search before private document retrieval; no persistent storage."""
     if re.search(r"\bgrowth\s*lab\s+systems\b|\bgrowthlabsystems\.com\b", str(question), re.I):
@@ -2110,7 +2126,7 @@ def ask(request: AskRequest, http_request: Request):
         person_name, research_query = (None, question) if (multi_names or deep_name) else _growthlab_person_research_query(question, history)
         if person_name or multi_names or deep_name:
             business = False
-        web_attempted = True
+        web_attempted = not _growthlab_conversational_request(question)
 
         web_sources = []
 
@@ -2121,7 +2137,7 @@ def ask(request: AskRequest, http_request: Request):
                     "sources": [], "model": AI_MODEL,
                     "session_id": public_session_id, "mode": "web_search"}
 
-        if not (deep_name or multi_names or person_name):
+        if web_attempted and not (deep_name or multi_names or person_name):
             web_sources = _growthlab_web_first(question)
 
         if business:
@@ -2559,8 +2575,11 @@ def ask_stream(request: AskRequest, http_request: Request):
                     )
                     return
 
-            yield event("status", message="Searching the live web first...")
-            pre_web_sources = [] if (deep_name or multi_names or person_name) else _growthlab_web_first(question)
+            conversational = _growthlab_conversational_request(question)
+            if not conversational:
+                yield event("status", message="Searching the live web first...")
+            pre_web_sources = ([] if (conversational or deep_name or multi_names or person_name)
+                               else _growthlab_web_first(question))
 
             if business:
 
@@ -2583,9 +2602,9 @@ def ask_stream(request: AskRequest, http_request: Request):
 
                 yield event("status", message="Reading matching documents..." if sources else "No matching documents found.")
 
-            web_attempted = True
+            web_attempted = not conversational
 
-            if not web_attempted and not business:
+            if not web_attempted and not business and not conversational:
                 budget_detected = detect_budget_request(question) is not None
 
                 if not budget_detected:
@@ -2781,7 +2800,7 @@ def ask_stream(request: AskRequest, http_request: Request):
         except Exception:
 
             logging.exception("GrowthLab AI streaming request failed")
-            if 'web_sources' in locals():
+            if 'web_sources' in locals() and web_attempted:
                 fallback = _growthlab_web_fallback(question, web_sources)
                 yield event("token", text=fallback)
                 save_history(session_id, question, fallback)
