@@ -1178,6 +1178,38 @@ def _growthlab_live_knowledge(question):
     return []
 
 
+def _growthlab_web_first(question):
+    """Live public search before private document retrieval; no persistent storage."""
+    try:
+        knowledge = _growthlab_live_knowledge(question)
+        if knowledge:
+            return knowledge
+    except Exception:
+        logging.exception("Web-first specialized lookup failed")
+    try:
+        return search_web(question) or []
+    except Exception:
+        logging.exception("Web-first general lookup failed")
+        return []
+
+
+def _growthlab_web_fallback(question, sources):
+    """Return sourced search results if the model times out; never invent a summary."""
+    if not sources:
+        return ("Live web information could not be verified, and the AI model "
+                "could not complete its response. Please retry shortly.")
+    lines = ["The live web search returned these sources, but AI summarization "
+             "is temporarily unavailable. Review the original pages:", ""]
+    for item in sources[:6]:
+        title = str(item.get("title") or "Source").replace("\n", " ")[:130]
+        url = str(item.get("url") or "")
+        snippet = str(item.get("snippet") or "").replace("\n", " ")[:260]
+        if url.startswith(("https://", "http://")):
+            lines.append(f"- **{title}**: {url}" + (f" — {snippet}" if snippet else ""))
+    lines.append("\nThese are search previews, not independently verified article contents.")
+    return "\n".join(lines)
+
+
 def search_web(question):
     """Combine relevant news and general search results."""
 
@@ -2001,6 +2033,25 @@ def ask(request: AskRequest, http_request: Request):
 
         context = None
 
+        deep_name = _growthlab_deep_research_subject(question)
+        multi_names = [] if deep_name else _growthlab_multi_person_names(question)
+        person_name, research_query = (None, question) if (multi_names or deep_name) else _growthlab_person_research_query(question, history)
+        if person_name or multi_names or deep_name:
+            business = False
+        web_attempted = True
+
+        web_sources = []
+
+        official_product_answer = _growthlab_official_product_answer(question) if not business else None
+        if official_product_answer is not None:
+            save_history(session_id, question, official_product_answer)
+            return {"question": question, "answer": official_product_answer,
+                    "sources": [], "model": AI_MODEL,
+                    "session_id": public_session_id, "mode": "web_search"}
+
+        if not (deep_name or multi_names or person_name):
+            web_sources = _growthlab_web_first(question)
+
         if business:
 
             # Include the previous business question for vague follow-ups.
@@ -2028,22 +2079,6 @@ def ask(request: AskRequest, http_request: Request):
                 context = None
                 sources = []
 
-        deep_name = _growthlab_deep_research_subject(question)
-        multi_names = [] if deep_name else _growthlab_multi_person_names(question)
-        person_name, research_query = (None, question) if (multi_names or deep_name) else _growthlab_person_research_query(question, history)
-        if person_name or multi_names or deep_name:
-            business = False
-        web_attempted = bool(person_name or multi_names or deep_name) or needs_web_search(question, business) or (not business and bool(_growthlab_bible_reference(question))) or (not business and _wiki_question(question))
-
-        web_sources = []
-
-        official_product_answer = _growthlab_official_product_answer(question) if not business else None
-        if official_product_answer is not None:
-            save_history(session_id, question, official_product_answer)
-            return {"question": question, "answer": official_product_answer,
-                    "sources": [], "model": AI_MODEL,
-                    "session_id": public_session_id, "mode": "web_search"}
-
         if deep_name:
             answer, web_sources = _growthlab_deep_person_research(deep_name, question)
             save_history(session_id, question, answer)
@@ -2054,7 +2089,7 @@ def ask(request: AskRequest, http_request: Request):
 
             try:
 
-                web_sources = search_web(research_query if person_name else question) if person_name else (_growthlab_live_knowledge(question) or search_web(question))
+                web_sources = search_web(research_query) if person_name else web_sources
 
             except Exception as exc:
 
@@ -2067,10 +2102,15 @@ def ask(request: AskRequest, http_request: Request):
             web_sources = [entry[-1] for entry in _growthlab_person_evidence(person_name, web_sources)]
             save_history(session_id, question, answer)
         else:
-            answer = generate_ai_answer(
-                question, session_id, context=context, business=business,
-                web_sources=web_sources, web_attempted=web_attempted
-            )
+            try:
+                answer = generate_ai_answer(
+                    question, session_id, context=context, business=business,
+                    web_sources=web_sources, web_attempted=web_attempted
+                )
+            except Exception:
+                logging.exception("Web-first model summarization failed")
+                answer = _growthlab_web_fallback(question, web_sources)
+                save_history(session_id, question, answer)
 
         if web_attempted:
 
@@ -2447,6 +2487,9 @@ def ask_stream(request: AskRequest, http_request: Request):
                     )
                     return
 
+            yield event("status", message="Searching the live web first...")
+            pre_web_sources = [] if (deep_name or multi_names or person_name) else _growthlab_web_first(question)
+
             if business:
 
                 yield event("status", message="Searching business documents...")
@@ -2468,7 +2511,7 @@ def ask_stream(request: AskRequest, http_request: Request):
 
                 yield event("status", message="Reading matching documents..." if sources else "No matching documents found.")
 
-            web_attempted = bool(person_name or multi_names or deep_name) or needs_web_search(question, business) or (not business and bool(_growthlab_bible_reference(question))) or (not business and _wiki_question(question))
+            web_attempted = True
 
             if not web_attempted and not business:
                 budget_detected = detect_budget_request(question) is not None
@@ -2485,7 +2528,7 @@ def ask_stream(request: AskRequest, http_request: Request):
                         model=AI_MODEL,
                     )
 
-            web_sources = []
+            web_sources = pre_web_sources
 
             if web_attempted:
 
@@ -2497,7 +2540,7 @@ def ask_stream(request: AskRequest, http_request: Request):
                     multi_answer, web_sources = _growthlab_multi_person_search(multi_names)
                 else:
                     try:
-                        web_sources = search_web(research_query if person_name else question) if person_name else (_growthlab_live_knowledge(question) or search_web(question))
+                        web_sources = search_web(research_query) if person_name else pre_web_sources
                     except Exception as exc:
                         print(f"Web search unavailable: {type(exc).__name__}: {exc}")
 
@@ -2666,7 +2709,14 @@ def ask_stream(request: AskRequest, http_request: Request):
         except Exception:
 
             logging.exception("GrowthLab AI streaming request failed")
-            yield event("error", message="Unable to complete the AI request. Check the backend logs.")
+            if 'web_sources' in locals():
+                fallback = _growthlab_web_fallback(question, web_sources)
+                yield event("token", text=fallback)
+                save_history(session_id, question, fallback)
+                yield event("done", answer=fallback, sources=[],
+                            session_id=public_session_id, mode="web_search")
+            else:
+                yield event("error", message="Unable to complete the AI request. Check the backend logs.")
 
     return StreamingResponse(generate(), media_type="application/x-ndjson",
 
