@@ -2037,6 +2037,13 @@ def ask(request: AskRequest, http_request: Request):
 
         web_sources = []
 
+        official_product_answer = _growthlab_official_product_answer(question) if not business else None
+        if official_product_answer is not None:
+            save_history(session_id, question, official_product_answer)
+            return {"question": question, "answer": official_product_answer,
+                    "sources": [], "model": AI_MODEL,
+                    "session_id": public_session_id, "mode": "web_search"}
+
         if deep_name:
             answer, web_sources = _growthlab_deep_person_research(deep_name, question)
             save_history(session_id, question, answer)
@@ -2067,7 +2074,7 @@ def ask(request: AskRequest, http_request: Request):
 
         if web_attempted:
 
-            sources = [] if (deep_name or multi_names or person_name) else web_sources
+            sources = []  # Source URLs are already included in the answer; avoid duplicate cards.
 
         return {
 
@@ -2238,6 +2245,56 @@ def _growthlab_verified_python_release_answer(question, answer, web_sources):
 
 
 
+def _growthlab_official_product_answer(question):
+    """Live, official-site-only verification for newest iPhone questions.
+
+    Never infer a release from third-party search previews. Fail closed when
+    Apple cannot be read; the ordinary search path remains available.
+    """
+    import re
+    from datetime import datetime, timezone
+    from urllib.parse import urlsplit
+
+    q = str(question or '').lower()
+    if not (re.search(r'\biphone\b', q) and re.search(
+            r'\b(latest|newest|current|recent|most recent)\b', q)):
+        return None
+    official_url = 'https://www.apple.com/iphone/'
+    page = _growthlab_read_webpage(official_url, max_chars=18000)
+    if not page:
+        return None
+    host = (urlsplit(str(page.get('url', ''))).hostname or '').lower()
+    if host not in ('apple.com', 'www.apple.com'):
+        return None
+    body = str(page.get('text') or '')
+    # Read the live official lineup. Do not infer a numbered model from the year.
+    matches = re.findall(r'\biPhone\s+(\d{1,2})\s*(Pro\s*Max|Pro|Plus|e)?\b', body, re.I)
+    if not matches:
+        return None
+    numbers = sorted({int(number) for number, _ in matches if 10 <= int(number) <= 40}, reverse=True)
+    if not numbers:
+        return None
+    newest = numbers[0]
+    variants = {re.sub(r'\s+', ' ', variant.strip()).lower() for number, variant in matches if int(number) == newest}
+    names = []
+    for variant in ('pro max', 'pro', 'plus', 'e', ''):
+        if variant in variants:
+            suffix = {'pro max': ' Pro Max', 'pro': ' Pro', 'plus': ' Plus', 'e': 'e', '': ''}[variant]
+            names.append(f'iPhone {newest}{suffix}')
+    # Only claim models whose name is actually present in Apple's retrieved text.
+    names = names[:4]
+    if not names:
+        return None
+    label = ', '.join(names)
+    stamp = datetime.now(timezone.utc).strftime('%B %d, %Y')
+    answer = (f'As of {stamp}, Apple’s official iPhone lineup lists **{label}** '
+              'among its newest numbered models. This was checked against '
+              'Apple’s live iPhone page, rather than inferred from search snippets. '
+              'Other newly introduced iPhones with different names may also be in the lineup.\n\n'
+              f'Official source: {official_url}')
+    return answer
+
+
 def _growthlab_clean_web_answer(answer, sources):
     """Remove model-authored hyperlinks; cite actual search results instead.
 
@@ -2328,6 +2385,14 @@ def ask_stream(request: AskRequest, http_request: Request):
         try:
 
             if not business:
+                official_product_answer = _growthlab_official_product_answer(question)
+                if official_product_answer is not None:
+                    yield event("status", message="Verified against Apple's official website.")
+                    yield event("token", text=official_product_answer)
+                    save_history(session_id, question, official_product_answer)
+                    yield event("done", answer=official_product_answer, sources=[],
+                                session_id=public_session_id, mode="web_search")
+                    return
                 verified = _growthlab_verified_n8n_release(
                     question
                 )
@@ -2567,7 +2632,7 @@ def ask_stream(request: AskRequest, http_request: Request):
 
             save_history(session_id, question, answer)
 
-            yield event("done", answer=answer, sources=sources, session_id=public_session_id,
+            yield event("done", answer=answer, sources=([] if web_attempted else sources), session_id=public_session_id,
 
                         mode="business_knowledge" if business else ("web_search" if web_attempted else "general_ai"))
 
