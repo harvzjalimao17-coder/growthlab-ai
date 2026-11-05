@@ -2246,10 +2246,10 @@ def _growthlab_verified_python_release_answer(question, answer, web_sources):
 
 
 def _growthlab_official_product_answer(question):
-    """Live, official-site-only verification for newest iPhone questions.
+    """Verify multiple current iPhones from Apple's live product and compare pages.
 
-    Never infer a release from third-party search previews. Fail closed when
-    Apple cannot be read; the ordinary search path remains available.
+    A comparison page lists legacy devices too, so its presence alone does not
+    establish current availability. Do not infer launch dates or inventory.
     """
     import re
     from datetime import datetime, timezone
@@ -2259,40 +2259,67 @@ def _growthlab_official_product_answer(question):
     if not (re.search(r'\biphone\b', q) and re.search(
             r'\b(latest|newest|current|recent|most recent)\b', q)):
         return None
+
     official_url = 'https://www.apple.com/iphone/'
-    page = _growthlab_read_webpage(official_url, max_chars=18000)
-    if not page:
+    compare_url = 'https://www.apple.com/iphone/compare/'
+    pages = []
+    for url in (official_url, compare_url):
+        page = _growthlab_read_webpage(url, max_chars=26000)
+        if not page:
+            continue
+        host = (urlsplit(str(page.get('url') or '')).hostname or '').lower()
+        if host not in ('apple.com', 'www.apple.com'):
+            continue
+        body = re.sub(r'\s+', ' ', str(page.get('text') or '')).strip()
+        if body:
+            pages.append((url, body))
+    if not pages:
         return None
-    host = (urlsplit(str(page.get('url', ''))).hostname or '').lower()
-    if host not in ('apple.com', 'www.apple.com'):
+
+    pattern = re.compile(r'\biPhone\s+(\d{1,2})\s*(Pro\s*Max|Pro|Plus|e)?\b', re.I)
+    # Use the highest numbered generation actually found in Apple's pages.
+    # Ignore lower-numbered phones on historical comparison lists.
+    observed = [(int(m.group(1)), (m.group(2) or '').lower().replace(' ', ''))
+                for _, body in pages for m in pattern.finditer(body)
+                if 10 <= int(m.group(1)) <= 40]
+    if not observed:
         return None
-    body = str(page.get('text') or '')
-    # Read the live official lineup. Do not infer a numbered model from the year.
-    matches = re.findall(r'\biPhone\s+(\d{1,2})\s*(Pro\s*Max|Pro|Plus|e)?\b', body, re.I)
-    if not matches:
-        return None
-    numbers = sorted({int(number) for number, _ in matches if 10 <= int(number) <= 40}, reverse=True)
-    if not numbers:
-        return None
-    newest = numbers[0]
-    variants = {re.sub(r'\s+', ' ', variant.strip()).lower() for number, variant in matches if int(number) == newest}
-    names = []
-    for variant in ('pro max', 'pro', 'plus', 'e', ''):
-        if variant in variants:
-            suffix = {'pro max': ' Pro Max', 'pro': ' Pro', 'plus': ' Plus', 'e': 'e', '': ''}[variant]
-            names.append(f'iPhone {newest}{suffix}')
-    # Only claim models whose name is actually present in Apple's retrieved text.
-    names = names[:4]
+    newest = max(n for n, _ in observed)
+    found = {suffix for n, suffix in observed if n == newest}
+    variants = [('promax', f'iPhone {newest} Pro Max'),
+                ('pro', f'iPhone {newest} Pro'),
+                ('plus', f'iPhone {newest} Plus'),
+                ('e', f'iPhone {newest}e'),
+                ('', f'iPhone {newest}')]
+    names = [name for suffix, name in variants if suffix in found]
+
+    # Different product families cannot be inferred from the numbered series.
+    # Include only distinct names explicitly present near the top of an
+    # official current-lineup page; exclude old product comparisons.
+    main_body = next((body for url, body in pages if url == official_url), '')
+    compare_body = next((body for url, body in pages if url == compare_url), '')
+    lineup_text = main_body[:6500] or compare_body[:1800]
+    for special in ('iPhone Duo', 'iPhone Air'):
+        if re.search(r'\b' + re.escape(special) + r'\b', lineup_text, re.I):
+            names.append(special)
+
     if not names:
         return None
-    label = ', '.join(names)
     stamp = datetime.now(timezone.utc).strftime('%B %d, %Y')
-    answer = (f'As of {stamp}, Apple’s official iPhone lineup lists **{label}** '
-              'among its newest numbered models. This was checked against '
-              'Apple’s live iPhone page, rather than inferred from search snippets. '
-              'Other newly introduced iPhones with different names may also be in the lineup.\n\n'
-              f'Official source: {official_url}')
-    return answer
+    if len(names) == 1:
+        listing = f'**{names[0]}**'
+    else:
+        listing = ', '.join(f'**{name}**' for name in names)
+    multiple = bool(re.search(r'\b(models|lineup|versions|options|all)\b', q))
+    if multiple:
+        lead = f'As of {stamp}, Apple’s official iPhone pages identify these recent models: {listing}.'
+    else:
+        lead = f'As of {stamp}, the newest numbered iPhone generation shown on Apple’s official pages includes {listing}.'
+    sources = '\n'.join(f'- {url}' for url, _ in pages)
+    return (lead + '\n\nThese names were found on Apple’s live pages. '
+            'A comparison listing alone does not prove local stock, current sale '
+            'status, or launch date; check Apple’s regional store for availability.\n\n'
+            'Official sources:\n' + sources)
 
 
 def _growthlab_clean_web_answer(answer, sources):
