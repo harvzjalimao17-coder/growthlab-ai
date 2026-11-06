@@ -7,3 +7,4 @@ requests==2.34.2
 pydantic==2.14.2
 pypdf==6.21.4
 python-multipart==0.0.32
+google-genai
