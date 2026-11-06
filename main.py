@@ -2126,7 +2126,7 @@ def ask(request: AskRequest, http_request: Request):
         person_name, research_query = (None, question) if (multi_names or deep_name) else _growthlab_person_research_query(question, history)
         if person_name or multi_names or deep_name:
             business = False
-        web_attempted = not _growthlab_conversational_request(question)
+        web_attempted = bool(deep_name or multi_names or person_name or needs_web_search(question, business=business))
 
         web_sources = []
 
@@ -2575,11 +2575,17 @@ def ask_stream(request: AskRequest, http_request: Request):
                     )
                     return
 
-            conversational = _growthlab_conversational_request(question)
-            if not conversational:
+            web_attempted = bool(
+                deep_name or multi_names or person_name
+                or needs_web_search(question, business=business)
+            )
+            if web_attempted:
                 yield event("status", message="Searching the live web first...")
-            pre_web_sources = ([] if (conversational or deep_name or multi_names or person_name)
-                               else _growthlab_web_first(question))
+            pre_web_sources = (
+                _growthlab_web_first(question)
+                if web_attempted and not (deep_name or multi_names or person_name)
+                else []
+            )
 
             if business:
 
@@ -2601,23 +2607,6 @@ def ask_stream(request: AskRequest, http_request: Request):
                     context, sources = None, []
 
                 yield event("status", message="Reading matching documents..." if sources else "No matching documents found.")
-
-            web_attempted = not conversational
-
-            if not web_attempted and not business and not conversational:
-                budget_detected = detect_budget_request(question) is not None
-
-                if not budget_detected:
-                    budget_detected = (
-                        detect_budget_followup(question, history) is not None
-                    )
-
-                if not budget_detected:
-                    web_attempted = intelligent_search_decision(
-                        question,
-                        ollama_client,
-                        model=AI_MODEL,
-                    )
 
             web_sources = pre_web_sources
 

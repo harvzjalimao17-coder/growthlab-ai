@@ -103,53 +103,75 @@ class HybridAIClient:
         except (TypeError, ValueError):
             generation_config = {"temperature": 0.2, "max_output_tokens": 1200}
 
-        # Explicit timeout prevents an indefinitely hanging 'Generating answer...' state.
-        client = genai.Client(
-            api_key=api_key,
-            http_options=types.HttpOptions(api_version="v1", timeout=60000),
-        )
-        params = {
-            "model": selected_model,
-            "input": prompt,
-            "generation_config": generation_config,
-        }
+        # Bounded retries before text is emitted; no duplicate streaming output.
+        from google.genai import types
+
+        def new_client():
+            return genai.Client(api_key=api_key,
+                http_options=types.HttpOptions(api_version="v1", timeout=30000))
+
+        params = {"model": selected_model, "input": prompt,
+                  "generation_config": generation_config}
         if system:
             params["system_instruction"] = system
 
+        def retryable(exc):
+            message = str(exc).lower()
+            return any(word in message for word in (
+                "503", "429", "high demand", "resource_exhausted",
+                "unavailable", "timeout", "timed out", "deadline_exceeded",
+                "connection reset", "readtimeout"))
+
+        def log_failure(exc, attempt):
+            logging.warning("Gemini request failed: model=%s attempt=%s/3 type=%s",
+                            selected_model, attempt, type(exc).__name__)
+
         if not stream:
-            try:
-                interaction = client.interactions.create(**params)
-                content = str(getattr(interaction, "output_text", "") or "")
-                if not content.strip():
-                    raise RuntimeError("Gemini returned no text")
-                return SimpleNamespace(message=SimpleNamespace(content=content))
-            except Exception as exc:
-                logging.error("Gemini Interactions failure: model=%s type=%s", selected_model, type(exc).__name__)
-                raise self._friendly_error(exc) from exc
-            finally:
-                client.close()
+            for attempt in range(1, 4):
+                client = new_client()
+                try:
+                    response = client.interactions.create(**params)
+                    content = str(getattr(response, "output_text", "") or "")
+                    if not content.strip():
+                        raise RuntimeError("Gemini returned no text")
+                    return SimpleNamespace(message=SimpleNamespace(content=content))
+                except Exception as exc:
+                    log_failure(exc, attempt)
+                    if attempt == 3 or not retryable(exc):
+                        raise self._friendly_error(exc) from exc
+                    time.sleep(min(2 ** (attempt - 1), 4))
+                finally:
+                    client.close()
 
         def generate():
-            emitted = False
-            try:
-                events = client.interactions.create(**params, stream=True)
-                for event in events:
-                    if getattr(event, "event_type", None) != "step.delta":
-                        continue
-                    delta = getattr(event, "delta", None)
-                    if getattr(delta, "type", None) != "text":
-                        continue
-                    content = getattr(delta, "text", "") or ""
-                    if content:
-                        emitted = True
-                        yield SimpleNamespace(message=SimpleNamespace(content=content))
-                if not emitted:
-                    raise RuntimeError("Gemini streaming finished without text")
-            except Exception as exc:
-                logging.error("Gemini Interactions stream failure: model=%s type=%s", selected_model, type(exc).__name__)
-                raise self._friendly_error(exc) from exc
-            finally:
-                client.close()
+            for attempt in range(1, 4):
+                client = new_client()
+                emitted = False
+                try:
+                    events = client.interactions.create(**params, stream=True)
+                    for event in events:
+                        kind = getattr(event, "event_type", None)
+                        if kind == "error":
+                            raise RuntimeError("Gemini returned an error event")
+                        if kind != "step.delta":
+                            continue
+                        delta = getattr(event, "delta", None)
+                        if getattr(delta, "type", None) != "text":
+                            continue
+                        content = getattr(delta, "text", "") or ""
+                        if content:
+                            emitted = True
+                            yield SimpleNamespace(message=SimpleNamespace(content=content))
+                    if not emitted:
+                        raise RuntimeError("Gemini streaming finished without text")
+                    return
+                except Exception as exc:
+                    log_failure(exc, attempt)
+                    if emitted or attempt == 3 or not retryable(exc):
+                        raise self._friendly_error(exc) from exc
+                    time.sleep(min(2 ** (attempt - 1), 4))
+                finally:
+                    client.close()
         return generate()
 
     def list(self):
