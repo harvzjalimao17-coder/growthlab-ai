@@ -511,6 +511,18 @@ def _growthlab_person_research_query(question, history=None):
     if follow and prior and any(re.search(r"\b(search|research|linkedin|facebook|profile|find)\b", x, re.I) for x in prior[-3:]):
         name = follow.group(1).strip().rstrip(".,!?;:")
         return name, f'Search for {name} on LinkedIn and Facebook'
+    # Exact-name web requests without a social-platform keyword are still
+    # person research. Stop at the request's trailing web/platform qualifier.
+    web_name = re.fullmatch(
+        r"(?:please\s+)?(?:search(?:\s+the\s+web)?\s+for|search|find|look\s+up|research)\s+"
+        r"([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){1,3})"
+        r"(?:\s+(?:on|in|across)\s+(?:the\s+)?(?:web|internet|linkedin|facebook))?[.!?]?",
+        q, re.I)
+    if web_name:
+        candidate = web_name.group(1).strip().rstrip(".,!?;:")
+        # Exclude ordinary topic searches; this is deliberately conservative.
+        if not re.search(r"\b(?:latest|news|weather|price|budget|software|python|n8n|automation|updates|information)\b", candidate, re.I):
+            return candidate, f'Search for "{candidate}" on the web'
     name = _person_search_subject(q)
     if name:
         return name, q
