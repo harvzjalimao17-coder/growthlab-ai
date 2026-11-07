@@ -479,7 +479,16 @@ def _person_search_subject(query):
     """Extract a person from a social-profile request, excluding output instructions."""
     text = str(query or "").strip()
     # Only interpret an unquoted phrase as a name when the request has person/profile intent.
-    profile_intent = bool(re.search(r"\b(linkedin|facebook|profiles?|accounts?|person|people)\b", text, re.I))
+    # A platform name in ordinary prose (e.g. "Facebook ads") is not
+    # evidence that the user is searching for a person. Require a search
+    # request, or explicit person/profile wording, before extracting names.
+    search_intent = bool(re.match(
+        r"^(?:(?:please|can you|could you)\s+)*(?:search|find|look\s+up|research|identify)\b",
+        text, re.I,
+    ))
+    person_intent = bool(re.search(r"\b(profiles?|accounts?|person|people)\b", text, re.I))
+    platform_intent = bool(re.search(r"\b(linkedin|facebook)\b", text, re.I))
+    profile_intent = person_intent or (search_intent and platform_intent)
     if not profile_intent:
         return None
     quoted = re.search(r"[\"“]([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){1,3})[\"”]", text)
