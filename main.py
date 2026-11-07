@@ -520,6 +520,60 @@ def _growthlab_person_research_query(question, history=None):
     return None, q
 
 
+def _growthlab_resolve_person_followup(question, history):
+    """Resolve short social-search follow-ups from the latest researched person.
+
+    Uses only the current session's user messages; never invents an identity.
+    An explicit new subject always wins. Unrelated messages stop inheritance.
+    """
+    q = re.sub(r"\s+", " ", str(question or "")).strip().lower().rstrip(".!? ")
+    linkedin = bool(re.fullmatch(
+        r"(?:try|check|search|look (?:up|on)|search (?:on|in)|what about|any|no|on)?\s*"
+        r"(?:linkedin|linked in)(?:\s+(?:profile|account|results?))?", q
+    ))
+    facebook = bool(re.fullmatch(
+        r"(?:try|check|search|look (?:up|on)|search (?:on|in)|what about|any|no|on)?\s*"
+        r"facebook(?:\s+(?:profile|account|results?))?", q
+    ))
+    general = bool(re.fullmatch(
+        r"(?:go (?:for|ahead (?:and|with)) )?(?:search (?:the )?web|web search|"
+        r"search (?:again|online)|look (?:again|online)|try (?:again|searching)|"
+        r"find (?:more|online)|search for (?:more|them)|check (?:again|online))", q
+    ))
+    if not (linkedin or facebook or general):
+        return None
+    prior_users = [str(m.get("content") or "").strip() for m in history
+                   if m.get("role") == "user"]
+    # Only inherit across a continuous chain of short search follow-ups.
+    for previous in reversed(prior_users):
+        if _growthlab_is_person_search_followup(previous):
+            continue
+        name, _ = _growthlab_person_research_query(re.sub(r"^(?:now|please)\s+", "", previous, flags=re.I), [])
+        if not name:
+            # A standalone capitalized name is a person-search subject only
+            # when it has 2-4 name-like words; do not use arbitrary prose.
+            if (not re.search(r"\b(?:project|budget|plan|report|task|order|invoice)\b", previous, re.I)
+                    and re.fullmatch(r"[A-Z][a-zA-Z.'-]+(?:\s+[A-Z][a-zA-Z.'-]+){1,3}", previous)):
+                name = previous
+        if not name:
+            return None
+        platform = 'LinkedIn' if linkedin else 'Facebook' if facebook else None
+        return (name, f'Search for "{name}" on {platform}' if platform
+                else f'Search for {name}')
+    return None
+
+
+def _growthlab_is_person_search_followup(question):
+    q = re.sub(r"\s+", " ", str(question or "")).strip().lower().rstrip(".!? ")
+    return bool(re.fullmatch(
+        r"(?:(?:try|check|search|look (?:up|on)|search (?:on|in)|what about|any|no|on)?\s*"
+        r"(?:linkedin|linked in|facebook)(?:\s+(?:profile|account|results?))?|"
+        r"(?:go (?:for|ahead (?:and|with)) )?(?:search (?:the )?web|web search|"
+        r"search (?:again|online)|look (?:again|online)|try (?:again|searching)|"
+        r"find (?:more|online)|search for (?:more|them)|check (?:again|online)))", q
+    ))
+
+
 def _growthlab_multi_person_names(question):
     """Recognize explicit two-person research requests without guessing names."""
     import re
@@ -2124,6 +2178,11 @@ def ask(request: AskRequest, http_request: Request):
         deep_name = _growthlab_deep_research_subject(question)
         multi_names = [] if deep_name else _growthlab_multi_person_names(question)
         person_name, research_query = (None, question) if (multi_names or deep_name) else _growthlab_person_research_query(question, history)
+        if not (deep_name or multi_names or person_name):
+            resolved = _growthlab_resolve_person_followup(question, history)
+            if resolved:
+                person_name, research_query = resolved
+                logging.warning("[SEARCH CONTEXT] Resolved person follow-up: %r", research_query)
         if person_name or multi_names or deep_name:
             business = False
         web_attempted = bool(deep_name or multi_names or person_name or needs_web_search(question, business=business))
@@ -2531,6 +2590,11 @@ def ask_stream(request: AskRequest, http_request: Request):
         deep_name = _growthlab_deep_research_subject(question)
         multi_names = [] if deep_name else _growthlab_multi_person_names(question)
         person_name, research_query = (None, question) if (multi_names or deep_name) else _growthlab_person_research_query(question, history)
+        if not (deep_name or multi_names or person_name):
+            resolved = _growthlab_resolve_person_followup(question, history)
+            if resolved:
+                person_name, research_query = resolved
+                logging.warning("[SEARCH CONTEXT] Resolved person follow-up: %r", research_query)
         business = (is_business_question(question, history) and not explicit_web_request(question) and not person_name and not multi_names and not deep_name)
 
         sources = []
